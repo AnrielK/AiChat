@@ -142,7 +142,90 @@ struct HFModelSummary: Decodable, Identifiable, Hashable, Sendable {
     var webURL: URL? { URL(string: "https://huggingface.co/\(id)") }
 }
 
+/// Jeden dataset ve výsledcích hledání.
+struct HFDatasetSummary: Decodable, Identifiable, Hashable, Sendable {
+    let id: String
+    let downloads: Int
+    let likes: Int
+    /// `gated` je v JSONu buď bool, nebo řetězec („auto“, „manual“) – proto vlastní dekódování.
+    let isGated: Bool
+    let isPrivate: Bool
+    let tags: [String]
+
+    private enum CodingKeys: String, CodingKey {
+        case id, downloads, likes, tags, gated
+        case isPrivate = "private"
+    }
+
+    init(from decoder: any Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        id = try container.decode(String.self, forKey: .id)
+        downloads = try container.decodeIfPresent(Int.self, forKey: .downloads) ?? 0
+        likes = try container.decodeIfPresent(Int.self, forKey: .likes) ?? 0
+        isPrivate = try container.decodeIfPresent(Bool.self, forKey: .isPrivate) ?? false
+        tags = try container.decodeIfPresent([String].self, forKey: .tags) ?? []
+        if let flag = try? container.decodeIfPresent(Bool.self, forKey: .gated) {
+            isGated = flag
+        } else {
+            // „auto“ i „manual“ znamenají, že se před stažením musí odsouhlasit podmínky.
+            isGated = (try? container.decodeIfPresent(String.self, forKey: .gated)) != nil
+        }
+    }
+
+    var author: String { id.split(separator: "/").first.map(String.init) ?? "" }
+    var name: String { id.split(separator: "/").dropFirst().first.map(String.init) ?? id }
+    var webURL: URL? { URL(string: "https://huggingface.co/datasets/\(id)") }
+
+    /// Licence z tagů (`license:cc-by-nc-4.0`) – u trénovacích dat se hodí vidět hned.
+    var license: String? {
+        tags.first { $0.hasPrefix("license:") }
+            .map { String($0.dropFirst("license:".count)) }
+    }
+
+    /// Jazyky z tagů (`language:cs`).
+    var languages: [String] {
+        tags.filter { $0.hasPrefix("language:") }
+            .map { String($0.dropFirst("language:".count)) }
+    }
+}
+
 extension HuggingFaceRepo {
+    /// Hledá datasety, seřazené podle počtu stažení.
+    ///
+    /// API hledá jen souvislý podřetězec, takže se pošle nejdelší slovo dotazu a zbytek
+    /// se dofiltruje tady – stejně jako u modelů.
+    ///
+    /// Nefiltruje se na to, jestli dataset umí prohlížeč datasetů. API to neříká
+    /// a zjistí se to až při načtení splitů; tam už je hláška srozumitelná.
+    static func searchDatasets(_ query: String, language: String? = nil) async throws -> [HFDatasetSummary] {
+        let words = query.lowercased().split(whereSeparator: \.isWhitespace).map(String.init)
+        guard var components = URLComponents(string: "https://huggingface.co/api/datasets") else { return [] }
+        var items = [
+            URLQueryItem(name: "sort", value: "downloads"),
+            URLQueryItem(name: "direction", value: "-1"),
+            URLQueryItem(name: "limit", value: words.count > 1 ? "100" : "50"),
+            // Bez toho by chyběly tagy, a tedy licence i jazyk.
+            URLQueryItem(name: "full", value: "true"),
+        ]
+        if let longest = words.max(by: { $0.count < $1.count }) {
+            items.append(URLQueryItem(name: "search", value: longest))
+        }
+        if let language {
+            items.append(URLQueryItem(name: "filter", value: "language:" + language))
+        }
+        components.queryItems = items
+        guard let url = components.url else { return [] }
+
+        let (data, response) = try await URLSession.shared.data(for: request(url))
+        if let http = response as? HTTPURLResponse, !(200..<300).contains(http.statusCode) {
+            throw ProviderError.http(status: http.statusCode, message: "Hledání datasetů selhalo.")
+        }
+        return try JSONDecoder().decode([HFDatasetSummary].self, from: data).filter { dataset in
+            let id = dataset.id.lowercased()
+            return words.allSatisfy { id.contains($0) }
+        }
+    }
+
     /// Úlohy, které s chatem nesouvisí (přepis řeči, obrázky, embeddingy…) – ve výsledcích je skryjeme.
     private static let nonChatPipelines: Set<String> = [
         "automatic-speech-recognition", "text-to-speech", "text-to-audio", "audio-to-audio", "audio-classification",

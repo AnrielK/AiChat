@@ -13,6 +13,12 @@ struct DatasetImportView: View {
     @Query private var existing: [TrainingSample]
 
     @State private var datasetID = ""
+    @State private var searchText = ""
+    @State private var czechOnly = true
+    @State private var results: [HFDatasetSummary] = []
+    @State private var isSearching = false
+    /// Aby se při psaní neposílal dotaz na každé písmeno.
+    @State private var searchTask: Task<Void, Never>?
     @State private var splits: [HuggingFaceDataset.Split] = []
     @State private var selectedSplit: HuggingFaceDataset.Split?
     @State private var page: HuggingFaceDataset.Page?
@@ -74,10 +80,98 @@ struct DatasetImportView: View {
         }
     }
 
+    // MARK: - Hledání
+
+    @ViewBuilder
+    private func datasetRow(_ dataset: HFDatasetSummary) -> some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Text(dataset.name)
+                .font(.subheadline.weight(.medium))
+                .foregroundStyle(.primary)
+            Text(dataset.author)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            HStack(spacing: 8) {
+                Label(dataset.downloads.compactFormatted, systemImage: "arrow.down.circle")
+                Label(dataset.likes.compactFormatted, systemImage: "heart")
+                // Licence je u trénovacích dat to první, co člověk potřebuje vědět –
+                // spousta českých datasetů je CC-BY-NC, tedy jen nekomerčně.
+                if let license = dataset.license {
+                    Text(license)
+                }
+                if dataset.isGated {
+                    Label("souhlas", systemImage: "lock")
+                }
+            }
+            .font(.caption2)
+            .foregroundStyle(.secondary)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .contentShape(.rect)
+    }
+
+    /// Hledání s malým zpožděním, ať se neposílá dotaz na každé písmeno.
+    private func search(now: Bool) {
+        searchTask?.cancel()
+        let query = searchText.trimmingCharacters(in: .whitespaces)
+        guard query.count >= 2 else {
+            results = []
+            isSearching = false
+            return
+        }
+        searchTask = Task {
+            if !now {
+                try? await Task.sleep(for: .milliseconds(350))
+                if Task.isCancelled { return }
+            }
+            isSearching = true
+            defer { isSearching = false }
+            do {
+                let found = try await HuggingFaceRepo.searchDatasets(
+                    query, language: czechOnly ? "cs" : nil)
+                if !Task.isCancelled { results = Array(found.prefix(25)) }
+            } catch {
+                if !Task.isCancelled {
+                    results = []
+                    errorMessage = error.localizedDescription
+                }
+            }
+        }
+    }
+
     // MARK: - Zdroj
 
     @ViewBuilder
     private var sourceSection: some View {
+        Section {
+            HStack {
+                TextField("Hledat na Hugging Face", text: $searchText)
+                    .textInputAutocapitalization(.never)
+                    .autocorrectionDisabled()
+                    .onSubmit { search(now: true) }
+                    .onChange(of: searchText) { search(now: false) }
+                if isSearching { ProgressView() }
+            }
+            Toggle("Jen české datasety", isOn: $czechOnly)
+                .onChange(of: czechOnly) { search(now: true) }
+
+            ForEach(results) { dataset in
+                Button {
+                    datasetID = dataset.id
+                    loadSplits()
+                } label: {
+                    datasetRow(dataset)
+                }
+                .buttonStyle(.plain)
+            }
+        } header: {
+            Text("Vyhledat")
+        } footer: {
+            if !searchText.isEmpty, results.isEmpty, !isSearching {
+                Text("Nic se nenašlo. Hledá se v názvu repozitáře, ne v popisu – zkus kratší slovo.")
+            }
+        }
+
         Section {
             HStack {
                 TextField("uživatel/dataset", text: $datasetID)

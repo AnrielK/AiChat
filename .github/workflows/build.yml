@@ -1,0 +1,162 @@
+# Nepodepsaná IPA AI Chatu na GitHub Actions.
+#
+# Build běží přes ./make-ipa.sh – stejně jako lokálně, včetně kontrol
+# (arm64, llama.framework, Metal shadery). IPA najdeš v artefaktech běhu,
+# u tagu v* se přiloží i k GitHub Release. Podpis řeší až sideload.
+
+name: Build IPA
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+    paths-ignore: ["**.md"]
+  pull_request:
+    paths-ignore: ["**.md"]
+  workflow_dispatch:
+    inputs:
+      configuration:
+        description: Konfigurace
+        type: choice
+        options: [Release, Debug]
+        default: Release
+
+# Nový push na stejnou větev zruší rozběhnutý build – na macOS runneru se minuty počítají.
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: write   # jen kvůli přiložení IPA k Release u tagu
+
+env:
+  CONFIGURATION: ${{ inputs.configuration || 'Release' }}
+
+jobs:
+  ios:
+    name: iOS (${{ inputs.configuration || 'Release' }})
+    runs-on: macos-26
+    timeout-minutes: 60
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          # Číslo buildu je počet commitů a marketingová verze se bere z tagu v* –
+          # s mělkým klonem (výchozí depth 1) by vyšlo 1 a tag by se nenašel.
+          fetch-depth: 0
+
+      # iOS 26 SDK (Liquid Glass, FoundationModels) je jen v Xcode 26+.
+      # Vybere nejnovější stabilní Xcode 26.x, betu jen když jiný není.
+      - name: Vybrat Xcode 26
+        run: |
+          XCODE="$(ls -d /Applications/Xcode_26*.app 2>/dev/null | grep -vi beta | sort -V | tail -1)"
+          [ -n "$XCODE" ] || XCODE="$(ls -d /Applications/Xcode_26*.app 2>/dev/null | sort -V | tail -1)"
+          if [ -z "$XCODE" ]; then
+            echo "::error::Na runneru není Xcode 26."
+            ls -d /Applications/Xcode*.app
+            exit 1
+          fi
+          sudo xcode-select -s "$XCODE/Contents/Developer"
+          xcodebuild -version
+
+      # MLX kompiluje Metal shadery a od Xcode 26 je Metal toolchain samostatná komponenta.
+      - name: Metal toolchain
+        run: |
+          if ! xcrun metal -v >/dev/null 2>&1; then
+            xcodebuild -downloadComponent MetalToolchain || sudo xcodebuild -downloadComponent MetalToolchain
+          fi
+          xcrun metal -v
+
+      # mlx-swift-lm, mlx-swift, swift-transformers a XCFramework llama.cpp (~90 MB).
+      - name: Cache Swift balíčků
+        uses: actions/cache@v4
+        with:
+          path: .build/SourcePackages
+          key: spm-${{ runner.os }}-${{ hashFiles('AIChat.xcodeproj/project.pbxproj', 'Packages/**/Package.swift', '**/Package.resolved') }}
+          restore-keys: spm-${{ runner.os }}-
+
+      # Optimalizovaný XCFramework llama.cpp (workflow llama-xcframework.yml), když existuje.
+      # Package.swift ho pozná podle složky Packages/LlamaCpp/llama.xcframework.
+      - name: Optimalizovaný llama.cpp
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if gh release download llama-cpu-opt --repo "${{ github.repository }}" --pattern llama.xcframework.zip -D /tmp/llama; then
+            ditto -x -k /tmp/llama/llama.xcframework.zip Packages/LlamaCpp/
+            echo "Používám optimalizovaný llama.xcframework"
+            echo "llama.cpp: optimalizovaný XCFramework (Release llama-cpu-opt)" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "Release llama-cpu-opt není – oficiální XCFramework"
+          fi
+
+      - name: Build
+        run: |
+          chmod +x make-ipa.sh
+          set -o pipefail
+          # Stejné číslo, jaké si spočítá skript – jen pro pojmenování artefaktu.
+          echo "BUILD_NUMBER=$(git rev-list --count HEAD)" >> "$GITHUB_ENV"
+          ./make-ipa.sh "$CONFIGURATION" 2>&1 | tee build.log
+
+      - name: Souhrn
+        if: always()
+        run: |
+          {
+            if [ -f "$IPA_NAME" ]; then
+              echo "### ✓ $IPA_NAME ($(du -h "$IPA_NAME" | cut -f1), $CONFIGURATION)"
+              echo
+              echo "$(xcodebuild -version | head -1) · commit \`${GITHUB_SHA::7}\`"
+              # Řádek „▸ verze …“ ze skriptu – stejné číslo, jaké je v IPA.
+              grep -m1 "▸ verze" build.log 2>/dev/null | sed 's/▸ /**/; s/$/**/' || true
+              RESOLVED="AIChat.xcodeproj/project.xcworkspace/xcshareddata/swiftpm/Package.resolved"
+              if [ -f "$RESOLVED" ]; then
+                echo
+                echo "**Verze balíčků**"
+                echo
+                python3 -c "import json,sys; [print(f'- {p[\"identity\"]} {p[\"state\"].get(\"version\") or p[\"state\"].get(\"revision\",\"\")[:7]}') for p in json.load(open(sys.argv[1]))['pins']]" "$RESOLVED" || true
+              fi
+              # Varování ze skriptu (⚠︎) – build prošel, ale něco nemusí fungovat.
+              if grep -q "⚠︎" build.log 2>/dev/null; then
+                echo
+                echo "**Varování**"
+                echo '```'
+                grep "⚠︎" build.log
+                echo '```'
+              fi
+            else
+              echo "### ✕ Build selhal"
+              echo
+              echo '```'
+              # Chyby kompilátoru a neúspěšné kontroly skriptu, bez duplicit.
+              grep -E "error:|✕" build.log 2>/dev/null | awk '!seen[$0]++' | head -60 || echo "(build.log chybí – selhal krok před buildem)"
+              echo '```'
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Nahrát IPA
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: AIChat-${{ env.CONFIGURATION }}-b${{ env.BUILD_NUMBER }}
+          path: ${{ env.IPA_NAME }}
+          retention-days: 30
+          if-no-files-found: error
+
+      # Package.resolved z běhu – když ho commitneš, CI i lokální build použijí stejné verze balíčků.
+      - name: Nahrát build log a Package.resolved
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-log-${{ github.sha }}
+          path: |
+            build.log
+            AIChat.xcodeproj/project.xcworkspace/xcshareddata/swiftpm/Package.resolved
+          retention-days: 14
+          if-no-files-found: ignore
+
+      - name: GitHub Release
+        if: success() && startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: ${{ env.IPA_NAME }}
+          generate_release_notes: true

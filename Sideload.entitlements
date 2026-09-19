@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Entitlementy pro nepodepsanou IPA (make-ipa.sh ji jimi ad-hoc podepíše).
+  Sideload nástroj (SideStore, AltStore) si je z podpisu přečte a při instalaci
+  o ně požádá pro tvůj účet. Bez nich iOS dá appce jen základní limit paměti.
+  - increased-memory-limit: vyšší limit paměti před ukončením (jetsam).
+    Na iPhonu s 8 GB RAM zvedne limit appky z ~3,3 GB na ~6,5 GB. Ověřeno,
+    že stačí sám o sobě – JIT (StikDebug) kvůli paměti není potřeba.
+-->
+<plist version="1.0">
+<dict>
+	<key>com.apple.developer.kernel.increased-memory-limit</key>
+	<true/>
+</dict>
+</plist>

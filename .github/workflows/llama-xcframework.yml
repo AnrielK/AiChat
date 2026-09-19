@@ -1,0 +1,95 @@
+# Vlastní XCFramework llama.cpp s instrukcemi moderních iPhonů.
+#
+# Oficiální XCFramework se pro iOS překládá bez -march, takže překladač cílí na nejstarší
+# arm64 (Apple A7): chybí dotprod a i8mm a ggml pro kvantizované násobení (Q4_K, Q6_K …)
+# používá pomalejší obecná NEON jádra. Týká se to i expertů MoE a přebalení husté části
+# (`ggml_cpu_has_dotprod()` / `ggml_cpu_has_matmul_int8()` se rozhodují při překladu).
+#
+# Workflow přeloží stejnou verzi llama.cpp s -march=armv8.6-a+dotprod+i8mm (Apple A15
+# a novější – iPhone 13 a výš) a nahraje ji jako Release „llama-cpu-opt“. Build IPA
+# (build.yml) si ji odtud stáhne a použije místo oficiální; když Release není, zůstane
+# u oficiální. Na starších iPhonech by takový build při startu spadl na neznámé instrukci.
+
+name: llama.cpp XCFramework (optimalizovaný)
+
+on:
+  workflow_dispatch:
+    inputs:
+      llama_build:
+        description: Verze llama.cpp (tag)
+        default: b10894
+      arm_arch:
+        description: Hodnota GGML_CPU_ARM_ARCH
+        default: armv8.6-a+dotprod+i8mm
+      blas:
+        description: >-
+          Backend BLAS (Accelerate). Vypnutím se hustá část a attention přesunou
+          při prefillu na Metal místo na CPU – experiment, viz README.
+        type: choice
+        default: "ON"
+        options: ["ON", "OFF"]
+
+permissions:
+  contents: write
+
+jobs:
+  xcframework:
+    runs-on: macos-26
+    timeout-minutes: 90
+    steps:
+      - name: Vybrat Xcode 26
+        run: |
+          XCODE="$(ls -d /Applications/Xcode_26*.app 2>/dev/null | grep -vi beta | sort -V | tail -1)"
+          [ -n "$XCODE" ] || XCODE="$(ls -d /Applications/Xcode_26*.app 2>/dev/null | sort -V | tail -1)"
+          sudo xcode-select -s "$XCODE/Contents/Developer"
+          xcodebuild -version
+
+      - name: Stáhnout llama.cpp
+        run: git clone --depth 1 --branch "${{ inputs.llama_build }}" https://github.com/ggml-org/llama.cpp.git
+
+      - name: Přidat -march do buildu pro iPhone
+        working-directory: llama.cpp
+        run: |
+          # Jen zařízení – simulátor běží na Macu runneru a instrukce tam řeší jinak.
+          perl -0pi -e 's/(build_ios_device\(\) \{.*?-DCMAKE_SYSTEM_NAME=iOS \\\n)/$1        -DGGML_CPU_ARM_ARCH=${{ inputs.arm_arch }} \\\n/s' build-xcframework.sh
+          grep -n "GGML_CPU_ARM_ARCH" build-xcframework.sh || { echo "::error::Úprava build-xcframework.sh selhala"; exit 1; }
+
+      - name: Nastavit GGML_BLAS
+        if: inputs.blas == 'OFF'
+        working-directory: llama.cpp
+        run: |
+          # Bez BLAS backendu nemá scheduler kam poslat hustou část a attention na CPU,
+          # takže je při prefillu (dávka >= 32 tokenů) vezme Metal přes op_offload.
+          # Týká se všech cílů, ne jen zařízení – simulátor musí odpovídat.
+          perl -0pi -e 's/(-DCMAKE_SYSTEM_NAME=(?:iOS|tvOS|visionOS|watchOS|Darwin) \\\n)/$1        -DGGML_BLAS=OFF \\\n/g' build-xcframework.sh
+          grep -c "GGML_BLAS=OFF" build-xcframework.sh
+
+      - name: Build
+        working-directory: llama.cpp
+        run: ./build-xcframework.sh ios-device ios-sim
+
+      - name: Ověřit instrukce v binárce
+        working-directory: llama.cpp
+        run: |
+          BIN="build-apple/llama.xcframework/ios-arm64/llama.framework/llama"
+          # vdotq/vmmlaq se přeloží na instrukce SDOT/USDOT – bez nich by build nic nezměnil.
+          if xcrun otool -tV "$BIN" | grep -qiE "\bsdot\b|\busdot\b"; then
+            echo "dotprod/i8mm instrukce nalezeny"
+          else
+            echo "::error::V binárce nejsou instrukce dotprod – -march se neprojevil"
+            exit 1
+          fi
+
+      - name: Zabalit a nahrát jako Release
+        working-directory: llama.cpp/build-apple
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          ditto -c -k --sequesterRsrc --keepParent llama.xcframework llama.xcframework.zip
+          NOTES="llama.cpp ${{ inputs.llama_build }} · GGML_CPU_ARM_ARCH=${{ inputs.arm_arch }} · GGML_BLAS=${{ inputs.blas }}"
+          gh release delete llama-cpu-opt --repo "${{ github.repository }}" --yes --cleanup-tag || true
+          gh release create llama-cpu-opt llama.xcframework.zip \
+            --repo "${{ github.repository }}" \
+            --title "llama.cpp XCFramework (optimalizovaný)" \
+            --notes "$NOTES" --prerelease
+          echo "$NOTES" >> "$GITHUB_STEP_SUMMARY"

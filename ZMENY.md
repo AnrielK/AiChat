@@ -1,0 +1,313 @@
+# Stop sekvence + agentní smyčka
+
+Dvě nové věci nad rámec XBRL práce. První dává smysl sáma o sobě, druhá na ní stojí.
+
+## `Providers/StoppingProvider.swift` (nový) + `ChatProvider`
+
+`ChatProvider` má nový požadavek `stopping(at:)`. Výchozí implementace obalí
+poskytovatele `StoppingProvider`em, který čte stream, uříšne text na první značce
+a stream ukončí — tím se zruší úloha pod ním a engine generování opravdu přestane
+(oba lokální enginy mají ve smyčce `Task.isCancelled`). Funguje to tedy i pro Claude
+a Gemini, bez zásahu do nich.
+
+Text se poslá dál se zpožděním o délku nejdelší značky minus jedna — značka může přijít
+rozdělená mezi dva tokeny a bez toho by se `>` mihlo uživateli na obrazovce.
+
+`MLXProvider` si `stopping(at:)` přebijí vlastní: značky se předávají až do
+`MLXEngine.generate` a kontrolují se přímo v generační smyčce, takže se nečeká ani na
+zrušení streamu. Přerušená generace navíc zahodí sezení (`dropSession`) — KV cache
+i `sessionTurns` by jinak seděly na odpověď, která nikdy nedoběhla.
+
+U llama.cpp jsem nativní cestu **nešel dělat**: patří do `LlamaEngine` a správně by to
+měla být GBNF gramatika, ne porovnávání řetězců. Zatím ho pokrývá obecný wrapper.
+
+## `Services/AgentPipeline.swift` (nový)
+
+Pět nástrojů, každý obal nad tím, co už `RetrievalPipeline` volá:
+
+| Volání | Co je pod tím |
+|---|---|
+| `CISLA <dotaz> >>` | `InlineXBRL.excerpt` |
+| `VYKAZ <název> >>` | statement větev v `excerpt` (8 000 znaků) |
+| `HLEDEJ <slova> >>` | `DocumentIndex.search` |
+| `KAPITOLA <číslo> >>` | `search(_:inSection:)` podle osnovy |
+| `ODPOVED >>` | konec smyčky |
+
+**První krok zůstává deterministický.** Fakta i úryvky k původnímu dotazu jsou v promptu
+hned, bez jediného volání modelu — to je proti agentovi výhoda, ne nevýhoda, protože
+na stejný výsledek by potřeboval dva průchody navíc. Agent je úniková cesta, když to
+nestačí.
+
+Strop je pět kroků a 6 000 znaků na výsledky nástrojů; starší kroky vypadnou odpředu.
+Poslední krok je bez nástrojů — model už jen píše odpověď.
+
+Hranice volání je skutečná: `>>` je stop značka, takže model za ní nic nedopíše.
+Parser je ale pojíštění na to, že ji 4B model zapomene — bere i konec řádku.
+Zadržování textu (`couldBeCall`) zůstává: značka zastaví generování, ale samotné slovo
+`CISLA` by se na obrazovce mihlo dřív.
+
+## Zapnutí
+
+`AppSettings.local.agentTools`, výchozí **vypnuto**. V `ChatViewModel` se řadí mezi
+`SummaryPipeline` a `RetrievalPipeline`. Vypnutý agent = dnešní chování beze změny.
+
+V `LocalModelSettingsView` je přepínač **„Hledat si nechat řídit modelem“**, ve stejné
+sekci jako „Stručné odpovědi nad přílohou“, s popiskem o ceně (každý krok je nový prompt).
+
+Poznámka: `sectionRouting` přepínač v UI nemá žádný — není to nová věc, jen si toho všimni,
+když budeš tu obrazovku procházet.
+
+## Nezkompilováno
+
+V prostředí není Swift toolchain. U téhle dávky to váží víc než u předchozích: sáhl jsem
+do `ChatProvider` protokolu, takže kdyby některý poskytovatel `stopping(at:)` nedostal
+z extensionu (např. proto, že je v jiném modulu), build spadne až tam.
+
+# Otagovaná čísla z inline XBRL + oprava dělení na kusy
+
+Pět souborů: jeden nový, čtyři upravené. Nahraj je do `AIChat/Services/` a `AIChat/Models/`
+přes stávající. `project.pbxproj` se needituje — projekt používá
+`PBXFileSystemSynchronizedRootGroup`, takže nový `.swift` stačí zkopírovat do složky.
+
+## Nové: `Services/InlineXBRL.swift`
+
+Parser inline XBRL a výběr faktů k dotazu.
+
+- `factTable(from:fileName:)` → tabulka faktů, nebo `nil`, když soubor iXBRL není.
+  Formát: pár řádků hlavičky, `---`, pak `ukazatel | období | rozpad | hodnota`.
+- `excerpt(from:matching:...)` → řádky k dotazu i s hlavičkou (kvůli mapování FY na data).
+- `factCount(in:)` → jen na odznak v UI.
+
+Parsuje se `ix:nonFraction` (čísla) a pět `dei:` údajů z hlavičky. Textové bloky
+(`ix:nonNumeric`) se ignorují — to jsou celé kapitoly zprávy a ty patří hledání v textu.
+
+Skenuje se přes `range(of:)`, ne regexem: na 2 MB dokumentu je to předvídatelné a hledá se
+vždycky od místa, kde skončilo minulé kolo. Předpona jmenného prostoru se u filerů liší,
+takže se hledá `context id="` a `context>` — v otevírací značce se `context>` nevyskytuje.
+
+**Fiskální rok** se počítá od `dei:DocumentFiscalYearFocus` zpátky po rocích, ne z kalendáře.
+NVIDII končí FY2026 25. ledna 2026; podle kalendáře by srovnávací rok končící 26. ledna 2025
+vyšel jako 2024, ne 2025.
+
+**Výběr k dotazu běží na dvě kola.** Nejdřív se vyberou ukazatele podle toho, jakou část názvu
+dotaz pokryl — bez toho vyhrává `Revenue Remaining Performance Obligation` nad `Revenues`,
+protože obojí obsahuje hledané slovo jednou. Pak se k vybraným ukazatelům doberou řádky
+s přednostmi: žádaný rok, shoda rozpadu („tržby v Číně"), celkové hodnoty před rozpady,
+novější roky dřív.
+
+Je tam i malý česko-anglický slovník (`synonyms`) — bez něj „tržby" nepotká `Revenues`.
+Je to seznam hlavních řádků výkazů, ne slovník; doplň si, co budeš potřebovat.
+
+## `Models/Attachment.swift`
+
+Nová vlastnost `facts: String?`. Optional s výchozím `nil`, takže staré zprávy se z SwiftData
+dekódují beze změny a stávající volání memberwise initu platí dál.
+V `detail` přibyl odznak `XBRL <počet>`.
+
+## `Services/AttachmentLoader.swift`
+
+Ve větvi pro `.htm`/`.html` se z originálu nejdřív vytáhnou fakta, teprve pak se přes
+`HTMLText.extract` zahodí značky — v čistém textu už se to poznat nedá.
+
+## `Services/RetrievalPipeline.swift`
+
+- `tagged` = tabulky faktů z příloh konverzace.
+- `needsDocument` je nově true i tehdy, když je podklad otagovaný a do kontextu by se vešel.
+- Fakta dostanou `max(800, min(3 500, remaining / 3))` znaků, zbytek zůstává úryvkům.
+- **Fakta se vybírají první**, ještě před textovou větví. Je to čisté porovnávání řetězců
+  bez volání modelu, takže je zadarmo spočítat je hned — a jejich výsledek rozhoduje,
+  jak moc se má hledat v textu.
+- Když se trefila (`lean`), textová větev se zeštíhlí: přeskočí se výběr kapitoly
+  (`QueryExpansion.section`) i překlad dotazu (`QueryExpansion.keywords`) — obojí je celý
+  průchod modelem — úryvky se stáhnou na tři a třetinu rozpočtu a vypne se náhradní
+  „beru začátek dokumentu". Text tak zůstává jen jako pozadí pro souvislosti.
+- Když se netrefila, chování je beze změny.
+- Předčasný odchod na `base.stream` při nulovém překryvu dotazu s dokumentem se použije
+  jen tehdy, když fakta nic nemají — jinak by se zahodila i tabulka.
+- Hlášení jsou přerovnaná: nejdřív věta o otagovaných číslech, pak o textu, a ta o tom,
+  že se podklad nevejde do kontextu, se objeví jen když textová větev jede naplno.
+- V promptu jdou fakta **před** úryvky, s pravidlem, že při rozporu s textem platí ona
+  a že zdrojem je přiložený soubor — bez toho si model k číslu vymyslel odkaz na
+  `docs.nvidia.com`, který v podkladech nikde není.
+
+## `Services/DocumentSections.swift`
+
+`chunks(of:maxCharacters:)` nově předřadí dalšímu kusu poslední řádek, který vypadá jako
+nadpis (`carryingCaptions`).
+
+Tohle je příčina té konkrétní chyby z fotky. Hranice kusu padla přesně za řádek
+`Operating Income by Reportable Segments` a další kus začal `Year Ended / Jan 25, 2026 …
+Total $ 139,297`. V takovém úryvku není nic, z čeho by model poznal, že čte provozní zisky,
+a hned pod tabulkou pokračuje věta o tržbách. Model to přečetl tak, jak to dostal.
+
+## Ověřeno na `nvda-20260125.htm`
+
+Algoritmus jsem si přepsal do Pythonu a pustil na tvém souboru:
+
+- 281 kontextů, 1 102 číselných faktů, po odstranění duplicit 970 řádků tabulky
+- `Revenues | FY2026 | 215 938 mil. USD`, `Operating Segments / Compute And Networking
+  Segment | 193 479`, geografie i koncové trhy
+- „Vyhledej revenue pro rok 2026" → první tři řádky výběru jsou celkové tržby FY2026
+  a jejich rozpady; dřív byl na 9. místě a ořez na 8 úryvcích ho odřízl
+- „tržby v Číně", „hrubá marže", „výzkum a vývoj", „čistý zisk 2026" trefují správný ukazatel
+- Sticky caption: kus s tabulkou provozních zisků teď začíná svým popiskem
+
+**Swift jsem nezkompiloval** — v prostředí není toolchain. Ověřená je logika, ne syntax.
+
+## Stručný režim
+
+Ve `concise` režimu se výběr faktů zkrátí na 12 řádků a 1 200 znaků. Se čtyřiceti řádky
+v promptu malý model celou tabulku přepsal do odpovědi jako markdown — na dotaz, který
+chtěl jedno číslo. K tomu tři pravidla navíc: výpis je podklad a ne odpověď, rozpad jen
+na vyžádání, stručná odpověď bez nadpisů a tabulek.
+
+V hlavičce výpisu je navíc věta, že se rozpady překrývají a nesčítají. Jeden ukazatel je
+rozepsaný po segmentech, po regionech i po koncových trzích zvlášť, takže `Data Center`
+už v sobě obsahuje `Compute` i `Networking`. XBRL vztah nadřazenosti mezi členy nenese,
+z řádků se to poznat nedá.
+
+## Navazující dotaz
+
+Hledalo se jen podle poslední zprávy. „Celou tabulku se všema daty prosím“ neobsahuje
+jediný pojem z dokumentu, takže fakta nenašla nic, vybrala se náhodná kapitola
+(`Item 6 – [Reserved]`), spustil se překlad dotazu do jazyka dokumentu a model dostal
+úryvky z `Item 1 – Business`.
+
+`followUp(to:in:)` přilepí předchozí dotaz uživatele — ale **jen když hledání podle
+samotné zprávy nic nenašlo**, jinak by přilepený text přebil dotaz, který je v pořádku.
+Zkouší se to na dvou místech: u faktů, když je výběr prázdný, a u textu, když
+`index.overlap` vyjde nula — tam ještě před tím, než se dotaz prohlásí za netýkající se
+přílohy.
+
+Ověřeno: `"Celou tabulku se všema daty prosím"` sám → nic; doplněný o
+`"Muzes mi vypsat income statement tabulku"` → Consolidated Statements of Income.
+
+## Vypsat celý výkaz
+
+Když dotaz žádá výkaz a výběr ho našel, přibude do pravidel věta, že má model přepsat
+**všechny** řádky výpisu jako tabulku, ve stejném pořadí, s původními názvy a jednotkami,
+nic nevynechávat, nepřepočítávat a nekomentovat. Bez toho vypsal tři řádky `Revenues`
+a zbytek okomentoval úvahou o tom, jestli má psát „mil.“.
+
+## Výkazy jako celek
+
+Dotaz „vypiš mi rozvahu“ nechce jeden ukazatel, ale celou tabulku. Výběr po ukazatelích
+na to odpovídál nesmysly: na „balance sheet“ vrátil `Valuation Allowances And Reserves
+Balance`, protože má v názvu slovo Balance, a na „Consolidated Statements of Income“
+vrátil `Income Tax Reconciliation State And Local Income Taxes`.
+
+Fakt si přitom nenese, do kterého výkazu patří — ta informace je v presentation linkbase,
+což je jiný soubor, který u přílohy není. Dá se ale zjistit z **pozice v dokumentu**: mezi
+nadpisem `Consolidated Balance Sheets` a nadpisem dalšího výkazu leží přesně fakta té rozvahy.
+
+`statementRanges` najde pět kanonických nadpisů. Každý je v souboru víckrát (obsah, vlastní
+výkaz, pak odkazy uvnitř příloh typu „recorded in our Consolidated Balance Sheets“), takže
+se bere první výskyt, za kterým následuje aspoň 15 čísel, a každý nadpis se použije jen
+jednou. Poslední výkaz končí tam, kde začínají otagované přílohy — jinak by pobral i účetní
+postupy.
+
+Tabulka faktů je teď rozdělená řádky `## Název výkazu`; uvnitř výkazu zůstávají řádky
+v pořadí, v jakém je dokument tiskne, jinde abecedně.
+
+`InlineXBRL.statementRequest(in:)` pozná takový dotaz. Pro něj se výběr nezkracuje
+(8 000 znaků, 160 řádků místo 1 200 a 12) a odpadnou pravidla stručnosti — odpovědí má být
+tabulka, ne jedna věta.
+
+Pozor na jednotné a množné číslo: „sheet“ má pět znaků, „sheets“ šest, takže se ořezáváním
+na šest znaků rozejdou. Proto jsou v `statementSynonyms` i `sheet` a `flow`.
+
+### Měřeno na `nvda-20260125.htm`
+
+Pět výkazů: Income 54 řádků, Comprehensive Income 12, Balance Sheets 72, Shareholders
+Equity 75, Cash Flows 103. Zbytek (654 řádků) je pod `## Ostatní údaje`. Výkaz zisku a
+ztráty začíná `Revenues | FY2026 | 215 938`, `FY2025 | 130 497`, `FY2024 | 60 922` a pokračuje
+přes Cost Of Revenue, Gross Profit až k Net Income Loss.
+
+## Pořadí v promptu: fakta až za úryvky
+
+Původně šel výpis faktů před úryvky. Na 4B modelu to nefungovalo: úryvky jsou v štíhlém
+režimu až 4 500 znaků, fakta 1 200, a to, co je blíž k dotazu, vyhrává. Model pak vyčetl
+číslo z tabulky v textu a k řádku `Revenues | FY2026 | 215 938 mil. USD`, který měl přímo
+v promptu, napsal, že čísla za 2026 nejsou k dispozici.
+
+Výpis je teď poslední blok před dotazem a pravidlo k němu říká výslovně, že je pro číselné
+údaje závazný a že když je údaj v něm, nemá model psát, že v podkladech není.
+
+## Kapitoly z otagovaných textových bloků
+
+`InlineXBRL.marking(_:)` vloží před každý otagovaný textový blok značku `§§ Název`,
+`DocumentSections.taggedHeadings` ji přijme jako hranici kapitoly vedle hlaviček `Item N`.
+
+Přílohy účetní závěrky jsou v iXBRL obalené blokem `…TextBlock`, jehož jméno je rovnou název
+poznámky (`IncomeTaxDisclosureTextBlock`, `SegmentReportingDisclosureTextBlock`). Vlastní
+nadpisy poznámek ale žádné číslo položky nenesou, takže je regulár na `Item N` nevidí a celá
+tahle část 10-K spadla pod jedinou hlavičku — proto byly na screenshotech všechny úryvky
+označené jako `Item 15 – Exhibits and Financial Statement Schedules`.
+
+Dvě věci, které to komplikují a jsou v kódu ošetřené:
+
+- **Bloky jsou vnořené.** V `SignificantAccountingPolicies` sedí jednotlivé `…PolicyTextBlock`,
+  v poznámce k dani jednotlivé tabulky. Bere se jen nejvyšší úroveň: zametákem zleva doprava,
+  co začíná uvnitř už přijatého bloku, se zahodí.
+- **Dlouhé bloky jsou rozsekané na `ix:continuation`.** `IncomeTaxDisclosureTextBlock` má sám
+  o sobě 151 bajtů a zbytek poznámky leží jinde. Skutečný konec se dopočítá podle řetězu
+  `continuedAt` — bez toho vyjde 69 falešných kapitol místo 22.
+
+Značka se vkládá jako `</p><p>§§ Název</p>`. Ta uzavírací na začátku je schválně: `HTMLText`
+dělá nový řádek jen z uzavíracích značek, a bez ní se marker uvnitř tabulky přilepí na konec
+předchozího řádku. Ze 22 kapitol jich tak na začátku řádku skončilo 5.
+
+Osnova v `QueryExpansion.section` má strop zvednutý ze 40 na 60 položek — jinak by se uřízly
+zrovna ty nové kapitoly, které jsou v seznamu poslední.
+
+### Měřeno na `nvda-20260125.htm`
+
+Kapitol 28 → 45, `Item 15` 98 932 → 18 223 znaků. Nově se samostatně jmenují mimo jiné
+Significant Accounting Policies, Commitments And Contingencies, Income Tax, Segment Reporting,
+Lessee Operating Leases, Valuation And Qualifying Accounts.
+
+**Čeho se to netýká:** otagované jsou přílohy účetní závěrky, kybernetická bezpečnost a pár
+položek obálky. `Item 1A – Risk Factors` (115 tisíc znaků) a `Item 7 – MD&A` (34 tisíc) tagy
+nemají a zůstávají jednou kapitolou jako dřív. Na ty by bylo potřeba hledat nadpisy uvnitř
+kapitoly, což s XBRL nesouvisí.
+
+## `Services/QueryExpansion.swift` + logování
+
+`RetrievalPipeline`, `QueryExpansion` i `InlineXBRL` psaly přes holý
+`Logger(subsystem:category:"retrieval")` s úrovní `.info`. To jde jen do os_log, takže se to
+v appce nikdy neukázalo a u sideloadovaného buildu se to nepřečte ani v Konzoli. Všechny tři
+teď používají `EngineLog(category: "retrieval")`, takže řádky přistanou v `AppLogView`
+vedle `[mlx]`.
+
+Co se loguje jako `notice` (jde do logu v appce):
+
+```
+rozpočet 74800 znaků · podklady 360924 znaků · fakta 1200 znaků · zbývá 73000 znaků · otagovaných podkladů 1
+XBRL: 1102 faktů, 970 řádků, 281 období
+vybraná kapitola 10/23: Item 7 – Management's Discussion and Analysis…
+kolo 1 · prompt 9312 znaků · 3 úryvků (zeštíhleno) · fakta ano 1187 znaků · historie 0 znaků
+```
+
+Text dotazu a název souboru jdou přes `log.debug`, který podle vlastní poznámky v `EngineLog`
+do souboru v appce nepíše — obsah promptu tam nepatří.
+
+Jedno rozhodnutí, které si přepiš, pokud s ním nesouhlasíš: název vybrané kapitoly jsem nechal
+v `notice`. Je to struktura dokumentu, ne obsah dotazu, a uživatel ho stejně vidí v hlášení nad
+odpovědí. Kdyby ti vadil v souboru v Caches, přesuň ho do `debug` a nech tam jen `10/23`.
+
+## Na co si dát pozor
+
+- **Jen čísla.** Rizikové faktory, komentář v MD&A, smlouvy — tam pořád jede `DocumentIndex`.
+- **Jen americké emitenty s iXBRL.** Starší zprávy a evropské firmy tuhle větev minou.
+- `format="ixt:num-comma-decimal"` je ošetřený, ale netestovaný — nemám na čem.
+- Parsování 2 MB souboru na telefonu chvíli trvá. Běží v `Task.detached` uvnitř
+  `AttachmentLoader`, takže UI to nezdrží, ale příloha se objeví o něco později.
+- Hlavička výpisu se opakuje u každého souboru. Při víc otagovaných přílohách najednou
+  to ukrojí pár set znaků navíc.
+
+## Další krok
+
+Tímhle je připravená polovina nástrojů pro tu agentní smyčku: `excerpt` je v podstatě
+hotový `fakt(dotaz)` a vrací pár krátkých řádků místo tisíců znaků úryvků. Zbývá
+`AgentPipeline` a stop sekvence v `LlamaProvider`/`MLXProvider` — bez nich model po
+volání nástroje mluví dál a ty čekáš.

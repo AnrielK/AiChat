@@ -1,0 +1,6 @@
+.build/
+Payload/
+*.ipa
+xcuserdata/
+.DS_Store
+Packages/LlamaCpp/llama.xcframework/

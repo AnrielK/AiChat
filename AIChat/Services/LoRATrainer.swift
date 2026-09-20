@@ -131,6 +131,9 @@ enum TrainingEstimate {
         var isMixtureOfExperts = false
         /// Model má vrstvy s lineární pozorností (`GatedDeltaNet`).
         var hasLinearAttention = false
+        /// Druhy vrstev z konfigurace (`full_attention`, `linear_attention`, …), shora dolů
+        /// tak, jak je model má. Prázdné = konfigurace je neuvádí.
+        var layerTypes: [String] = []
 
         /// Proč tenhle model natrénovat nejde, nebo nil, když jde.
         ///
@@ -139,14 +142,46 @@ enum TrainingEstimate {
         /// nemá definovaný gradient, a rekurentní gatedDelta vrstva na tom je
         /// stejně. Výsledkem je výjimka z C++ vrstvy, kterou Swift neodchytí –
         /// proces prostě skončí.
-        var trainingBlocker: String? {
+        var trainingBlocker: String? { blocker(adapterLayers: 0) }
+
+        /// Proč to nejde, s ohledem na to, kolik horních vrstev dostane adaptér.
+        ///
+        /// Zpětný průchod jde jen od ztráty k **nejnižší** adaptované vrstvě – co je pod
+        /// ní, se nederivuje. Když tedy všechny adaptované vrstvy mají plnou pozornost,
+        /// rekurentní vrstvy níž vůbec nevadí a trénovat jde. U modelů, kde je plná
+        /// pozornost každá čtvrtá vrstva, to vyjde jen při hodně malém počtu vrstev
+        /// s adaptérem – a taková LoRA se toho moc nenaučí. Ale je to rozdíl mezi
+        /// „nejde vůbec“ a „jde omezeně“.
+        ///
+        /// `adapterLayers` = 0 znamená „ptám se obecně“, tedy nejpřísnější odpověď.
+        func blocker(adapterLayers: Int) -> String? {
             if isMixtureOfExperts {
                 return "Model má směs expertů (MoE). Zpětný průchod přes kvantované experty MLX neumí, takže trénink aplikaci ukončí."
             }
-            if hasLinearAttention {
-                return "Model má vrstvy s lineární pozorností. Zpětný průchod přes ně MLX neumí, takže trénink aplikaci ukončí."
+            guard hasLinearAttention else { return nil }
+            if adapterLayers > 0, !layerTypes.isEmpty {
+                let top = layerTypes.suffix(adapterLayers)
+                if top.allSatisfy({ $0 == "full_attention" }) { return nil }
+                let usable = trainableTopLayers
+                return usable > 0
+                    ? "Model má vrstvy s lineární pozorností, přes které MLX neumí zpětný "
+                        + "průchod. Adaptér smí dostat nejvýš \(usable) horních vrstev – "
+                        + "s víc než tolika trénink aplikaci ukončí."
+                    : "Model má vrstvy s lineární pozorností. Zpětný průchod přes ně MLX "
+                        + "neumí a nejvyšší vrstva je jedna z nich, takže trénink nejde vůbec."
             }
-            return nil
+            return "Model má vrstvy s lineární pozorností. Zpětný průchod přes ně MLX neumí, takže trénink aplikaci ukončí."
+        }
+
+        /// Kolik horních vrstev je ještě celých s plnou pozorností.
+        var trainableTopLayers: Int {
+            guard hasLinearAttention else { return layerTypes.count }
+            var count = 0
+            for type in layerTypes.reversed() {
+                guard type == "full_attention" else { break }
+                count += 1
+            }
+            return count
         }
     }
 
@@ -165,6 +200,7 @@ enum TrainingEstimate {
                 || facts.modelType.lowercased().contains("moe")
             let linearKeys = ["linear_attn_layers", "layer_types", "linear_conv_kernel_dim", "full_attention_interval"]
             facts.hasLinearAttention = linearKeys.contains { text[$0] != nil || object[$0] != nil }
+            facts.layerTypes = (text["layer_types"] as? [String]) ?? (object["layer_types"] as? [String]) ?? []
         }
         let files = (try? FileManager.default.contentsOfDirectory(
             at: modelDirectory, includingPropertiesForKeys: [.fileSizeKey]
@@ -413,7 +449,7 @@ actor LoRATrainer {
         )
         // `available` je to, co zbývá do jetsam limitu právě teď – po uvolnění
         // chatovacích enginů, ale ještě před načtením vah.
-        if let blocker = facts.trainingBlocker {
+        if let blocker = facts.blocker(adapterLayers: configuration.numLayers) {
             throw ProviderError.engine(
                 blocker + " Vyber hustý model bez MoE – například Qwen3-4B-4bit."
             )

@@ -38,7 +38,10 @@ struct TrainingView: View {
     /// takže se pozná ještě před načtením vah.
     private var architectureBlocker: String? {
         guard let model, model.kind == .mlx else { return nil }
-        return TrainingEstimate.facts(modelDirectory: model.url).trainingBlocker
+        // Posílá se i počet vrstev s adaptérem: když jsou všechny s plnou pozorností,
+        // rekurentní vrstvy pod nimi se při zpětném průchodu vůbec neprojdou.
+        return TrainingEstimate.facts(modelDirectory: model.url)
+            .blocker(adapterLayers: configuration.numLayers)
     }
 
     /// Kolik si trénink při současném nastavení nejspíš vezme. Počítá se z velikosti

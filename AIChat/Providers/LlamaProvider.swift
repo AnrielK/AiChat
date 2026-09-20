@@ -8,7 +8,13 @@ import llama
 struct LlamaProvider: ChatProvider {
     let modelPath: String
     let settings: LocalModelSettings
-    let reasoning: Bool
+    var reasoning: Bool
+
+    func thinking(_ enabled: Bool) -> any ChatProvider {
+        var copy = self
+        copy.reasoning = enabled
+        return copy
+    }
 
     func stream(_ history: [ChatTurn]) -> AsyncThrowingStream<StreamEvent, Error> {
         AsyncThrowingStream { continuation in

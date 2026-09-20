@@ -48,6 +48,11 @@ protocol ChatProvider: Sendable {
     /// dodává `StoppingProvider`; engine, který to umí sám, si ji přebije.
     func stopping(at sequences: [String]) -> any ChatProvider
 
+    /// Kopie se zapnutým nebo vypnutým přemýšlením. U vnitřních kol, kde má model
+    /// napsat jediný řádek, je přemýšlení jen zdržení. Poskytovatelé, kteří ho neřídí
+    /// (cloudové), vrátí sami sebe.
+    func thinking(_ enabled: Bool) -> any ChatProvider
+
     /// Varianta pro jednorázové vnitřní kolo – dílčí shrnutí kapitoly, prompt
     /// s vyhledanými podklady. Takový prompt se v příští zprávě neopakuje, takže
     /// si engine nemá co držet a KV cache by jen zabírala paměť.

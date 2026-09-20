@@ -32,8 +32,12 @@ struct AgentPipeline: ChatProvider {
     /// dopsat ani vymyšlený výsledek nástroje.
     static let terminator = ">>"
 
+    /// Kolo, ve kterém si model říká o nástroj. Přemýšlení je tu vypnuté schválně:
+    /// výstupem má být jediný řádek `NÁSTROJ argument >>`, a rozvaha před ním stojí
+    /// stovky tokenů. Na stejný krok vygeneroval model s přemýšlením 2 795 tokenů;
+    /// samotné volání jich má deset.
     private var toolBase: any ChatProvider {
-        base.oneShot().stopping(at: [Self.terminator])
+        base.oneShot().thinking(false).stopping(at: [Self.terminator])
     }
 
     private static let log = EngineLog(category: "retrieval")
@@ -274,7 +278,9 @@ struct AgentPipeline: ChatProvider {
     /// Jeden průchod modelem, ze kterého se bere jen text.
     private func answer(to prompt: String) async throws -> String {
         var text = ""
-        for try await event in base.oneShot().stream([ChatTurn(role: .user, text: prompt)]) {
+        // Shrnutí části kapitoly je vytahování, ne úvaha – a násobí se počtem částí.
+        let provider = base.oneShot().thinking(false)
+        for try await event in provider.stream([ChatTurn(role: .user, text: prompt)]) {
             if case .text(let piece) = event { text += piece }
         }
         return text.trimmingCharacters(in: .whitespacesAndNewlines)

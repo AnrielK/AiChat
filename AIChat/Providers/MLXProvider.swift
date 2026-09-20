@@ -13,7 +13,7 @@ import Tokenizers
 struct MLXProvider: ChatProvider {
     let directory: URL
     let settings: LocalModelSettings
-    let reasoning: Bool
+    var reasoning: Bool
     /// Jednorázové kolo: po odpovědi se sezení zahodí, protože na tenhle prompt
     /// už se navazovat nebude.
     var isOneShot = false
@@ -30,6 +30,12 @@ struct MLXProvider: ChatProvider {
     func stopping(at sequences: [String]) -> any ChatProvider {
         var copy = self
         copy.stopSequences += sequences
+        return copy
+    }
+
+    func thinking(_ enabled: Bool) -> any ChatProvider {
+        var copy = self
+        copy.reasoning = enabled
         return copy
     }
 

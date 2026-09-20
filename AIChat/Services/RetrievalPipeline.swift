@@ -257,6 +257,8 @@ struct RetrievalPipeline: ChatProvider {
                 // hledalo výhradně v ní, zbytek dokumentu se vůbec nepodíval.
                 // Zásah z kapitoly se proto předřadí a zbytek rozpočtu doplní
                 // globální výsledky.
+                // Obě pomocná kola chtějí jedno číslo nebo pár slov – přemýšlení je
+                // v nich čistá ztráta času a jede se přes ně při každém dotazu.
                 if sectionRouting, !lean, !wantsWholeChapter, round == 1, index.outline.count >= 3,
                    let picked = await cachedSection(for: query, outline: index.outline) {
                     let inSection = index.search(
@@ -581,7 +583,7 @@ struct RetrievalPipeline: ChatProvider {
     /// Klíčová slova k dotazu z cache, jinak jeden průchod modelem.
     private func cachedKeywords(for query: String, sample: String) async -> String? {
         if let stored = await DocumentIndexCache.shared.keywords(for: query) { return stored }
-        guard let fresh = await QueryExpansion.keywords(for: query, sample: sample, using: base)
+        guard let fresh = await QueryExpansion.keywords(for: query, sample: sample, using: base.thinking(false))
         else { return nil }
         await DocumentIndexCache.shared.store(keywords: fresh, for: query)
         return fresh
@@ -593,7 +595,7 @@ struct RetrievalPipeline: ChatProvider {
         if let stored = await DocumentIndexCache.shared.section(for: query) {
             return stored.isEmpty ? nil : stored
         }
-        let picked = await QueryExpansion.section(for: query, outline: outline, using: base)
+        let picked = await QueryExpansion.section(for: query, outline: outline, using: base.thinking(false))
         await DocumentIndexCache.shared.store(section: picked ?? "", for: query)
         return picked
     }

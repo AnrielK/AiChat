@@ -24,6 +24,10 @@ struct StoppingProvider: ChatProvider {
         StoppingProvider(base: base, sequences: self.sequences + sequences)
     }
 
+    func thinking(_ enabled: Bool) -> any ChatProvider {
+        StoppingProvider(base: base.thinking(enabled), sequences: sequences)
+    }
+
     func stream(_ history: [ChatTurn]) -> AsyncThrowingStream<StreamEvent, Error> {
         let sequences = self.sequences.filter { !$0.isEmpty }
         guard !sequences.isEmpty else { return base.stream(history) }
@@ -70,6 +74,9 @@ struct StoppingProvider: ChatProvider {
 }
 
 extension ChatProvider {
+    /// Výchozí: poskytovatel přemýšlení neřídí (Claude, Gemini, Apple Intelligence).
+    func thinking(_ enabled: Bool) -> any ChatProvider { self }
+
     /// Kopie, která přestane generovat na některé ze značek. Výchozí implementace
     /// obalí poskytovatele `StoppingProvider`em; engine, který značky umí sám
     /// (MLX), si ji přebije vlastní.

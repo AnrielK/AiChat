@@ -3,9 +3,9 @@ import SwiftUI
 import UIKit
 import UniformTypeIdentifiers
 
-/// Text odpovědi rozdělený na bloky: běžný text (inline markdown), nadpisy, oddělovače
-/// a bloky kódu. Kód se ukazuje v samostatném okně s názvem jazyka a tlačítkem
-/// na kopírování, místo aby se ```značky vypisovaly do textu.
+/// Text odpovědi rozdělený na bloky: běžný text (inline markdown), nadpisy, oddělovače,
+/// tabulky a bloky kódu. Kód a tabulky se ukazují v samostatném okně s tlačítky
+/// na kopírování a uložení, místo aby se ```značky a | svislítka vypisovaly do textu.
 struct MessageContentView: View {
     let text: String
 
@@ -30,6 +30,8 @@ struct MessageContentView: View {
                         isComplete: closed,
                         fileName: MessageBlock.fileName(for: index, in: blocks)
                     )
+                case .table(let table):
+                    TableBlockView(table: table, fileName: MessageBlock.tableFileName(for: index, in: blocks))
                 }
             }
         }
@@ -43,9 +45,10 @@ enum MessageBlock: Equatable {
     case rule
     /// `closed` = false, dokud model blok ještě píše (chybí uzavírací ```).
     case code(language: String, code: String, closed: Bool)
+    case table(MarkdownTable)
 
     /// Rozdělí markdown na bloky. Řeší jen to, co SwiftUI `Text` neumí: bloky kódu,
-    /// nadpisy a oddělovače. Zbytek (tučné, kurzíva, `kód`, odkazy) zůstane inline markdownu.
+    /// nadpisy, oddělovače a tabulky. Zbytek (tučné, kurzíva, `kód`, odkazy) zůstane inline markdownu.
     static func parse(_ source: String) -> [MessageBlock] {
         var blocks: [MessageBlock] = []
         var paragraph: [Substring] = []
@@ -62,8 +65,12 @@ enum MessageBlock: Equatable {
             paragraph = []
         }
 
-        for line in source.split(separator: "\n", omittingEmptySubsequences: false) {
+        let lines = source.split(separator: "\n", omittingEmptySubsequences: false)
+        var index = 0
+        while index < lines.count {
+            let line = lines[index]
             let trimmed = line.trimmingCharacters(in: .whitespaces)
+            index += 1
 
             if let open = fence {
                 // Uzavírací značka: jen backticky/vlnovky, aspoň tolik jako u otevření.
@@ -84,6 +91,31 @@ enum MessageBlock: Equatable {
                     .trimmingCharacters(in: .whitespaces)
                     .components(separatedBy: .whitespaces).first ?? ""
                 continue
+            }
+
+            // Tabulka: řádek se svislítky a pod ním oddělovač |---|:--:|.
+            // Během generování se ukáže, jakmile model dopíše oddělovač, a řádky pak přibývají.
+            if trimmed.contains("|"), index < lines.count,
+               let alignments = tableSeparator(lines[index]) {
+                let header = tableCells(trimmed)
+                if header.count == alignments.count {
+                    flushParagraph()
+                    var rows: [[String]] = []
+                    index += 1
+                    while index < lines.count {
+                        let row = lines[index].trimmingCharacters(in: .whitespaces)
+                        guard row.contains("|") else { break }
+                        var cells = tableCells(row)
+                        // Chybějící buňky doplnit, přebytečné zahodit – jako GitHub.
+                        if cells.count < header.count {
+                            cells += Array(repeating: "", count: header.count - cells.count)
+                        }
+                        rows.append(Array(cells.prefix(header.count)))
+                        index += 1
+                    }
+                    blocks.append(.table(MarkdownTable(header: header, alignments: alignments, rows: rows)))
+                    continue
+                }
             }
 
             if let heading = heading(trimmed) {
@@ -134,6 +166,42 @@ enum MessageBlock: Equatable {
             .trimmingCharacters(in: .whitespaces)
         guard !content.isEmpty else { return nil }
         return .heading(level: hashes.count, content)
+    }
+
+    /// Buňky řádku tabulky. Krajní svislítka jsou volitelná, `\|` je svislítko v textu.
+    static func tableCells(_ line: String) -> [String] {
+        var text = line.trimmingCharacters(in: .whitespaces)
+        if text.hasPrefix("|") { text.removeFirst() }
+        if text.hasSuffix("|"), !text.hasSuffix("\\|") { text.removeLast() }
+        let placeholder = "\u{FFFF}"
+        return text.replacingOccurrences(of: "\\|", with: placeholder)
+            .components(separatedBy: "|")
+            .map {
+                $0.replacingOccurrences(of: placeholder, with: "|")
+                    // Zalomení v buňce píšou modely jako <br>.
+                    .replacingOccurrences(of: #"<br\s*/?>"#, with: "\n", options: [.regularExpression, .caseInsensitive])
+                    .trimmingCharacters(in: .whitespaces)
+            }
+    }
+
+    /// Oddělovač pod hlavičkou tabulky („| --- | :---: | ---: |“) → zarovnání sloupců.
+    private static func tableSeparator(_ line: Substring) -> [MarkdownTable.Alignment]? {
+        let trimmed = line.trimmingCharacters(in: .whitespaces)
+        guard trimmed.contains("|"), trimmed.contains("-") else { return nil }
+        var result: [MarkdownTable.Alignment] = []
+        for cell in tableCells(trimmed) {
+            let left = cell.hasPrefix(":"), right = cell.hasSuffix(":")
+            let dashes = cell.trimmingCharacters(in: CharacterSet(charactersIn: ":"))
+            guard !dashes.isEmpty, dashes.allSatisfy({ $0 == "-" }) else { return nil }
+            result.append(left && right ? .center : right ? .trailing : left ? .leading : .automatic)
+        }
+        return result.isEmpty ? nil : result
+    }
+
+    /// „tabulka.csv“, u další tabulky v odpovědi „tabulka-2.csv“.
+    static func tableFileName(for index: Int, in blocks: [MessageBlock]) -> String {
+        let before = blocks[..<index].filter { if case .table = $0 { return true }; return false }.count
+        return before == 0 ? "tabulka.csv" : "tabulka-\(before + 1).csv"
     }
 
     private static func isRule(_ line: String) -> Bool {
@@ -398,5 +466,213 @@ struct CodeFile: Transferable {
         let cleaned = name.components(separatedBy: CharacterSet(charactersIn: "/\\:"))
             .last?.trimmingCharacters(in: .whitespaces) ?? ""
         return cleaned.isEmpty ? "kod.txt" : cleaned
+    }
+}
+
+/// Tabulka z markdownu. Buňky jsou pořád inline markdown (tučné, `kód`, odkazy).
+struct MarkdownTable: Equatable {
+    enum Alignment: Equatable {
+        /// Bez dvojtečky v oddělovači – čísla doprava, text doleva.
+        case automatic, leading, center, trailing
+    }
+
+    let header: [String]
+    let alignments: [Alignment]
+    let rows: [[String]]
+
+    /// Obsah buňky bez markdownu – pro kopírování a CSV.
+    static func plain(_ cell: String) -> String {
+        String(MessageBlock.inlineMarkdown(cell).characters)
+    }
+
+    /// Sloupec, ve kterém jsou jen čísla (částky, procenta, roky) – zarovná se doprava.
+    func isNumeric(column: Int) -> Bool {
+        let values = rows.map { Self.plain($0[column]).trimmingCharacters(in: .whitespaces) }
+            .filter { !$0.isEmpty && $0 != "–" && $0 != "-" }
+        guard !values.isEmpty else { return false }
+        let pattern = #"^[+\-−–(]?[\d\s\u00A0.,']+\)?\s*(%|Kč|CZK|€|EUR|\$|USD|mil\.?|mld\.?|tis\.?|[kKMB])?$"#
+        return values.allSatisfy { value in
+            let stripped = value.replacingOccurrences(of: "$", with: "", options: .anchored)
+            return stripped.range(of: pattern, options: .regularExpression) != nil
+                && stripped.contains(where: \.isNumber)
+        }
+    }
+
+    func alignment(column: Int) -> Alignment {
+        let stated = column < alignments.count ? alignments[column] : .automatic
+        guard stated == .automatic else { return stated }
+        return isNumeric(column: column) ? .trailing : .leading
+    }
+
+    /// Tabulátory mezi buňkami – po vložení do Numbers nebo Excelu se rozloží do sloupců.
+    var tsv: String {
+        ([header] + rows).map { row in
+            row.map { Self.plain($0).replacingOccurrences(of: "\t", with: " ") }
+                .joined(separator: "\t")
+        }
+        .joined(separator: "\n")
+    }
+
+    /// CSV se středníkem – česká Excel ho otevře rovnou do sloupců (čárka je desetinný
+    /// oddělovač). BOM na začátku, ať Excel pozná UTF-8 a nerozbije diakritiku.
+    var csv: String {
+        let lines = ([header] + rows).map { row in
+            row.map { cell -> String in
+                let value = Self.plain(cell)
+                guard value.contains(where: { ";\"\n\r".contains($0) }) else { return value }
+                return "\"" + value.replacingOccurrences(of: "\"", with: "\"\"") + "\""
+            }
+            .joined(separator: ";")
+        }
+        return "\u{FEFF}" + lines.joined(separator: "\r\n") + "\r\n"
+    }
+}
+
+/// Okno s tabulkou: počet řádků, uložení jako CSV a kopírování (tabulátory, vloží se
+/// do Numbers/Excelu po sloupcích). Široká tabulka se posouvá do strany, dlouhý text
+/// v buňce se zalomí.
+struct TableBlockView: View {
+    let table: MarkdownTable
+    var fileName = "tabulka.csv"
+
+    @State private var copied = false
+
+    /// Nejširší sloupec; delší obsah se v buňce zalomí na víc řádků.
+    private static let maxColumnWidth: CGFloat = 240
+    private static let minColumnWidth: CGFloat = 44
+    private static let cellPadding: CGFloat = 10
+
+    var body: some View {
+        let widths = columnWidths()
+        VStack(alignment: .leading, spacing: 10) {
+            HStack {
+                Text("Tabulka")
+                    .font(.subheadline.weight(.semibold))
+                Text("\(table.rows.count) \(Self.rowsLabel(table.rows.count))")
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+                Spacer()
+                ShareLink(
+                    item: CodeFile(name: fileName, code: table.csv),
+                    preview: SharePreview(fileName, image: Image(systemName: "tablecells"))
+                ) {
+                    Image(systemName: "square.and.arrow.down")
+                        .font(.body.weight(.medium))
+                        .frame(width: 32, height: 32)
+                        .contentShape(.rect)
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("Uložit jako \(fileName)")
+
+                Button {
+                    UIPasteboard.general.string = table.tsv
+                    withAnimation(.snappy) { copied = true }
+                    Task {
+                        try? await Task.sleep(for: .seconds(1.5))
+                        withAnimation(.snappy) { copied = false }
+                    }
+                } label: {
+                    Image(systemName: copied ? "checkmark" : "doc.on.doc")
+                        .font(.body.weight(.medium))
+                        .contentTransition(.symbolEffect(.replace))
+                        .frame(width: 32, height: 32)
+                        .contentShape(.rect)
+                }
+                .buttonStyle(.plain)
+                .sensoryFeedback(.success, trigger: copied) { _, new in new }
+                .accessibilityLabel(copied ? "Zkopírováno" : "Kopírovat tabulku")
+            }
+
+            ScrollView(.horizontal, showsIndicators: false) {
+                Grid(alignment: .topLeading, horizontalSpacing: 0, verticalSpacing: 0) {
+                    GridRow {
+                        ForEach(table.header.indices, id: \.self) { column in
+                            cell(table.header[column], column: column, width: widths[column])
+                                .font(.subheadline.weight(.semibold))
+                        }
+                    }
+                    Divider()
+                        .gridCellUnsizedAxes(.horizontal)
+                    ForEach(table.rows.indices, id: \.self) { row in
+                        GridRow {
+                            ForEach(table.header.indices, id: \.self) { column in
+                                cell(table.rows[row][column], column: column, width: widths[column])
+                                    .font(.subheadline)
+                                    .monospacedDigit()
+                            }
+                        }
+                        if row < table.rows.count - 1 {
+                            Divider()
+                                .gridCellUnsizedAxes(.horizontal)
+                                .opacity(0.5)
+                        }
+                    }
+                }
+            }
+        }
+        .padding(16)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Color(uiColor: .secondarySystemBackground), in: .rect(cornerRadius: 20))
+        .overlay {
+            RoundedRectangle(cornerRadius: 20)
+                .strokeBorder(Color.primary.opacity(0.06))
+        }
+    }
+
+    private func cell(_ text: String, column: Int, width: CGFloat) -> some View {
+        let alignment = table.alignment(column: column)
+        return Text(MessageBlock.inlineMarkdown(text))
+            .multilineTextAlignment(alignment.textAlignment)
+            .fixedSize(horizontal: false, vertical: true)
+            .frame(width: width, alignment: alignment.frameAlignment)
+            .padding(.horizontal, Self.cellPadding / 2)
+            .padding(.vertical, 7)
+    }
+
+    /// Šířka sloupců podle nejdelšího obsahu, změřená skutečným písmem. V ScrollView
+    /// do strany by `Text` jinak nedostal žádnou šířku a nikdy by se nezalomil.
+    private func columnWidths() -> [CGFloat] {
+        let body = UIFont.preferredFont(forTextStyle: .subheadline)
+        let bold = UIFont.systemFont(ofSize: body.pointSize, weight: .semibold)
+        return table.header.indices.map { column in
+            var widest = Self.measure(MarkdownTable.plain(table.header[column]), font: bold)
+            for row in table.rows {
+                widest = max(widest, Self.measure(MarkdownTable.plain(row[column]), font: body))
+            }
+            return min(Self.maxColumnWidth, max(Self.minColumnWidth, ceil(widest) + 2))
+        }
+    }
+
+    private static func measure(_ text: String, font: UIFont) -> CGFloat {
+        // Víceřádková buňka (<br> model píše jako zalomení) se měří po nejdelším řádku.
+        text.components(separatedBy: .newlines)
+            .map { ($0 as NSString).size(withAttributes: [.font: font]).width }
+            .max() ?? 0
+    }
+
+    static func rowsLabel(_ count: Int) -> String {
+        switch count {
+        case 1: "řádek"
+        case 2...4: "řádky"
+        default: "řádků"
+        }
+    }
+}
+
+private extension MarkdownTable.Alignment {
+    var frameAlignment: SwiftUI.Alignment {
+        switch self {
+        case .trailing: .trailing
+        case .center: .center
+        case .leading, .automatic: .leading
+        }
+    }
+
+    var textAlignment: TextAlignment {
+        switch self {
+        case .trailing: .trailing
+        case .center: .center
+        case .leading, .automatic: .leading
+        }
     }
 }

@@ -15,12 +15,15 @@
 		AC0000000000000000000044 /* MLX in Frameworks */ = {isa = PBXBuildFile; productRef = AC0000000000000000000036 /* MLX */; };
 		AC0000000000000000000045 /* MLXNN in Frameworks */ = {isa = PBXBuildFile; productRef = AC0000000000000000000038 /* MLXNN */; };
 		AC0000000000000000000046 /* MLXOptimizers in Frameworks */ = {isa = PBXBuildFile; productRef = AC0000000000000000000039 /* MLXOptimizers */; };
+		AC0000000000000000000050 /* FinFillCore in Frameworks */ = {isa = PBXBuildFile; productRef = AC0000000000000000000053 /* FinFillCore */; };
+		AC0000000000000000000051 /* FinFillUI in Frameworks */ = {isa = PBXBuildFile; productRef = AC0000000000000000000054 /* FinFillUI */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
 		AC0000000000000000000001 /* AIChat.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = AIChat.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		AC0000000000000000000002 /* AIChat.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = AIChat.entitlements; sourceTree = "<group>"; };
 		AC0000000000000000000022 /* LlamaCpp */ = {isa = PBXFileReference; lastKnownFileType = wrapper; name = LlamaCpp; path = Packages/LlamaCpp; sourceTree = "<group>"; };
+		AC0000000000000000000052 /* FinFill */ = {isa = PBXFileReference; lastKnownFileType = wrapper; name = FinFill; path = Packages/FinFill; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFileSystemSynchronizedRootGroup section */
@@ -44,6 +47,8 @@
 				AC0000000000000000000044 /* MLX in Frameworks */,
 				AC0000000000000000000045 /* MLXNN in Frameworks */,
 				AC0000000000000000000046 /* MLXOptimizers in Frameworks */,
+				AC0000000000000000000050 /* FinFillCore in Frameworks */,
+				AC0000000000000000000051 /* FinFillUI in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -56,6 +61,7 @@
 				AC0000000000000000000003 /* AIChat */,
 				AC0000000000000000000002 /* AIChat.entitlements */,
 				AC0000000000000000000022 /* LlamaCpp */,
+				AC0000000000000000000052 /* FinFill */,
 				AC0000000000000000000006 /* Products */,
 			);
 			sourceTree = "<group>";
@@ -96,6 +102,8 @@
 				AC0000000000000000000036 /* MLX */,
 				AC0000000000000000000038 /* MLXNN */,
 				AC0000000000000000000039 /* MLXOptimizers */,
+				AC0000000000000000000053 /* FinFillCore */,
+				AC0000000000000000000054 /* FinFillUI */,
 			);
 			productName = AIChat;
 			productReference = AC0000000000000000000001 /* AIChat.app */;
@@ -128,6 +136,7 @@
 			minimizedProjectReferenceProxies = 1;
 			packageReferences = (
 				AC0000000000000000000021 /* XCLocalSwiftPackageReference "Packages/LlamaCpp" */,
+				AC0000000000000000000055 /* XCLocalSwiftPackageReference "Packages/FinFill" */,
 				AC0000000000000000000030 /* XCRemoteSwiftPackageReference "mlx-swift-lm" */,
 				AC0000000000000000000031 /* XCRemoteSwiftPackageReference "swift-transformers" */,
 				AC0000000000000000000037 /* XCRemoteSwiftPackageReference "mlx-swift" */,
@@ -320,6 +329,10 @@
 			isa = XCLocalSwiftPackageReference;
 			relativePath = Packages/LlamaCpp;
 		};
+		AC0000000000000000000055 /* XCLocalSwiftPackageReference "Packages/FinFill" */ = {
+			isa = XCLocalSwiftPackageReference;
+			relativePath = Packages/FinFill;
+		};
 /* End XCLocalSwiftPackageReference section */
 
 /* Begin XCRemoteSwiftPackageReference section */
@@ -388,6 +401,14 @@
 			isa = XCSwiftPackageProductDependency;
 			package = AC0000000000000000000037 /* XCRemoteSwiftPackageReference "mlx-swift" */;
 			productName = MLXOptimizers;
+		};
+		AC0000000000000000000053 /* FinFillCore */ = {
+			isa = XCSwiftPackageProductDependency;
+			productName = FinFillCore;
+		};
+		AC0000000000000000000054 /* FinFillUI */ = {
+			isa = XCSwiftPackageProductDependency;
+			productName = FinFillUI;
 		};
 /* End XCSwiftPackageProductDependency section */
 	};

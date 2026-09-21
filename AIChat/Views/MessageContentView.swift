@@ -304,7 +304,7 @@ struct CodeBlockView: View {
     @State private var isExpanded = false
 
     /// Od kolika řádků se kód sbalí a kolik se jich ve sbaleném stavu ukáže.
-    private static let collapseAbove = 40
+    private static let collapseAbove = 30
     private static let collapsedLines = 20
     /// Největší kus do jednoho `Text` – SwiftUI velmi dlouhý text nevykreslí.
     private static let piece = 4_000
@@ -313,13 +313,20 @@ struct CodeBlockView: View {
         code.split(separator: "\n", omittingEmptySubsequences: false)
     }
 
-    /// Rozepsaný blok se ukazuje celý, ať je vidět, jak přibývá.
-    private var isCollapsible: Bool { isComplete && lines.count > Self.collapseAbove }
+    /// Sbalit jde i rozepsaný blok – jinak by dlouhý kód při generování zabral celou
+    /// obrazovku a přepínač by se objevil až na konci.
+    private var isCollapsible: Bool { lines.count > Self.collapseAbove }
 
+    /// Sbalený hotový kód ukazuje začátek. Rozepsaný ukazuje posledních pár řádků,
+    /// ať je vidět, co model právě píše.
     private var visibleCode: String {
         guard isCollapsible, !isExpanded else { return code }
-        return lines.prefix(Self.collapsedLines).joined(separator: "\n")
+        let shown = isComplete ? lines.prefix(Self.collapsedLines) : lines.suffix(Self.collapsedLines)
+        return shown.joined(separator: "\n")
     }
+
+    /// Kolik řádků je ve sbaleném stavu skrytých nad/pod ukázkou.
+    private var hiddenLines: Int { max(0, lines.count - Self.collapsedLines) }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
@@ -362,6 +369,12 @@ struct CodeBlockView: View {
                 .accessibilityLabel(copied ? "Zkopírováno" : "Kopírovat kód")
             }
 
+            if isCollapsible, !isExpanded, !isComplete {
+                Text("… \(hiddenLines) \(Self.linesLabel(hiddenLines)) výše")
+                    .font(.caption)
+                    .foregroundStyle(.tertiary)
+            }
+
             ScrollView(.horizontal, showsIndicators: false) {
                 VStack(alignment: .leading, spacing: 0) {
                     ForEach(Array(pieces(of: visibleCode).enumerated()), id: \.offset) { _, part in
@@ -379,7 +392,7 @@ struct CodeBlockView: View {
                     withAnimation(.smooth(duration: 0.2)) { isExpanded.toggle() }
                 } label: {
                     Label(
-                        isExpanded ? "Zobrazit méně" : "Zobrazit celý kód (\(lines.count) řádků)",
+                        isExpanded ? "Zobrazit méně" : "Zobrazit celý kód (\(lines.count) \(Self.linesLabel(lines.count)))",
                         systemImage: isExpanded ? "chevron.up" : "chevron.down"
                     )
                     .font(.caption.weight(.medium))
@@ -394,6 +407,14 @@ struct CodeBlockView: View {
         .overlay {
             RoundedRectangle(cornerRadius: 20)
                 .strokeBorder(Color.primary.opacity(0.06))
+        }
+    }
+
+    static func linesLabel(_ count: Int) -> String {
+        switch count {
+        case 1: "řádek"
+        case 2...4: "řádky"
+        default: "řádků"
         }
     }
 

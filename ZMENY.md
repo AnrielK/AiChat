@@ -1,3 +1,59 @@
+# 10-K → Google Sheets (FinFill)
+
+Nový lokální balíček **`Packages/FinFill`** (vedle `LlamaCpp`, target používá `FinFillCore`
+a `FinFillUI`) a v Nastavení nová sekce **Nástroje**.
+
+## Co dělá
+
+Pro ticker stáhne ze SEC poslední 10-K a companyfacts JSON, doplní čísla do existujícího
+Google Sheets sešitu (šablona „NVDA Valuation – 5y“, listy IncomeStatement / BalanceSheets /
+CashFlowStatement, sloupec podle roku v řádku 2) a modelem vybraným v Nastavení udělá souhrn.
+
+- **Čísla nepočítá model.** Mapování buňka ← XBRL koncepty je JSON
+  (`Resources/nvda-valuation-5y.json`). Segmenty (Graphics / Compute & Networking) jsou
+  dimenzionální fakta – companyfacts je nemá, berou se z iXBRL samotného 10-K.
+- Víc položek v jedné buňce se zapíše jako vzorec ve stylu šablony (`=10383+2867`,
+  `=21352-O21`, `={prev}30`), aby byl vidět původ.
+- **14 kontrol součtů** proti tomu, co firma vykazuje (tržby, hrubý zisk, EBIT, EBT, čistý
+  zisk, aktiva, závazky, VK, L+E, CFO, CFI, CFF). Když některá nesedí, zápis je zablokovaný.
+- Přepisují se jen prázdné buňky a nuly (přepínač „Přepsat neprázdné buňky“).
+- Backtest: mapování se spustí i na minulý rok a porovná se sloupcem, který už v sešitu je.
+- Souhrn: Item 1, 1A, 7, 7A → kusy podle kontextu → body → souhrn sekcí → shrnutí pro
+  valuaci. Čísla do něj dostane model jako hotovou tabulku z XBRL a smí citovat jen ji.
+  Výsledek se zapíše na list `Summary FY<rok>`.
+
+NVDA FY2026: všech 14 kontrol sedí na milion, backtest FY2025 proti ručně vyplněnému
+sloupci N sedí ve výsledovce i cash flow; v rozvaze se liší jen rozdělení položek
+(dlouhodobé investice, leasing, kmenové akcie), součty stejné. V CF je nová položka Groq, Inc.
+(13 000) – jde do Cash Acquisitions.
+
+## Aplikace
+
+- `Services/FinFillEngine.swift` – `LLMEngine` nad `makeProvider(profile: .summarize,
+  reasoningOverride: false, maxTokensOverride:)` a `oneShot()`, stejně jako `SummaryPipeline`.
+  Kontext `min(délka kontextu, effectiveContext ?? 8k, summaryChunkTokens)`.
+- `Services/GoogleAuth.swift` – OAuth 2 + PKCE přes `ASWebAuthenticationSession`, bez Google
+  SDK a bez URL scheme v Info.plist. Refresh token v Klíčence (`KeychainAccount.googleRefresh`),
+  access token jen v paměti.
+- `Views/FinFillScreen.swift` – obrazovka „10-K → Google Sheets“ (náhled → zápis → souhrn)
+  a „Google účet“ (client ID, přihlášení, návod ke Google Cloud Console).
+
+## Testy
+
+`cd Packages/FinFill && swift test` – 8 testů nad přiloženým NVDA 10-K (fixture 2 MB).
+CLI pro Mac: `swift run finfill local --html <10-K>` vypíše buňky a kontroly bez sítě.
+
+## Známá omezení
+
+- `FinFillCore` (SEC, iXBRL, mapování, Sheets, souhrn) je přeložený a otestovaný mimo Xcode;
+  SwiftUI obrazovky a `GoogleAuth` jen syntakticky – první build v Xcode je ověří.
+- Mapování je pro šablonu NVDA; jiná firma = upravit segmentové řádky (`dims`) a koncepty
+  s prefixem firmy (`nvda:…`). Kontroly ukážou, co chybí.
+- Vedle `Services/InlineXBRL.swift` (výběr faktů pro chat) je to druhý parser iXBRL –
+  FinFill je samostatný modul, aby šel testovat bez aplikace.
+
+---
+
 # Kód v odpovědi ve vlastním okně
 
 `Views/MessageContentView.swift` (nový): odpověď se dělí na bloky. Blok ```jazyk … ```

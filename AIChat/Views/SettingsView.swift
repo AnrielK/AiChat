@@ -79,6 +79,23 @@ struct SettingsView: View {
                     }
                 }
 
+                Section("Nástroje") {
+                    NavigationLink {
+                        FinFillScreen()
+                    } label: {
+                        Label("10-K → Google Sheets", systemImage: "tablecells")
+                    }
+                    NavigationLink {
+                        GoogleAccountView()
+                    } label: {
+                        LabeledContent {
+                            Text(GoogleAuth.shared.isSignedIn ? "Připojeno" : "Nepřipojeno")
+                                .foregroundStyle(GoogleAuth.shared.isSignedIn ? .green : .secondary)
+                        } label: {
+                            Label("Google účet", systemImage: "person.crop.circle")
+                        }
+                    }
+                }
 
                 Section {
                     LabeledContent("Verze", value: AppVersion.short)

@@ -504,6 +504,46 @@ struct MarkdownTable: Equatable {
         return isNumeric(column: column) ? .trailing : .leading
     }
 
+    /// Hlavička a jednotka pro zobrazení. Jednotka v závorce, kterou sdílí víc sloupců
+    /// („FY2026 (mil. USD)“, „FY2025 (mil. USD)“), se z hlavičky odstraní a ukáže se jednou
+    /// nad tabulkou. Jiné jednotky („Změna (%)“) zůstanou v hlavičce, jak jsou.
+    /// Kopírování a CSV berou původní hlavičku, ať se jednotka mimo appku neztratí.
+    var displayHeader: (header: [String], unit: String?) {
+        let split = header.map(Self.splitUnit)
+        var counts: [String: Int] = [:]
+        for unit in split.compactMap(\.unit) { counts[unit.lowercased(), default: 0] += 1 }
+        // Jediná jednotka v tabulce, nebo ta, která se opakuje nejčastěji (a jednoznačně).
+        let ranked = counts.sorted { $0.value > $1.value }
+        guard let top = ranked.first,
+              counts.count == 1 || (top.value >= 2 && (ranked.count < 2 || ranked[1].value < top.value))
+        else { return (header, nil) }
+        let unit = split.compactMap(\.unit).first { $0.lowercased() == top.key } ?? top.key
+        let titles = zip(header, split).map { original, part in
+            part.unit?.lowercased() == top.key ? part.title : original
+        }
+        return (titles, unit)
+    }
+
+    /// „FY2026 (mil. USD)“ → („FY2026“, „mil. USD“). Bere jen závorku na konci, a jen
+    /// když v ní je jednotka – „Segment (GAAP)“ zůstane celý.
+    static func splitUnit(_ cell: String) -> (title: String, unit: String?) {
+        let pattern = #"^(.*\S)\s*[(\[]\s*([^()\[\]]{1,24}?)\s*[)\]]$"#
+        guard let regex = try? NSRegularExpression(pattern: pattern),
+              let match = regex.firstMatch(in: cell, range: NSRange(cell.startIndex..., in: cell)),
+              let titleRange = Range(match.range(at: 1), in: cell),
+              let unitRange = Range(match.range(at: 2), in: cell)
+        else { return (cell, nil) }
+        let unit = String(cell[unitRange])
+        guard isUnit(unit) else { return (cell, nil) }
+        return (String(cell[titleRange]), unit)
+    }
+
+    /// Měna, řád (tis., mil., mld.) nebo procenta.
+    private static func isUnit(_ text: String) -> Bool {
+        let pattern = #"(?i)(^|[\s.,/])(tis|tisíc|mil|mld|milion\w*|miliard\w*|mn|bn|k|m|usd|eur|czk|kč|gbp|chf|jpy|ks|kusů|p\.?\s?b\.?)($|[\s.,/])|[%$€£¥]"#
+        return text.range(of: pattern, options: .regularExpression) != nil
+    }
+
     /// Tabulátory mezi buňkami – po vložení do Numbers nebo Excelu se rozloží do sloupců.
     var tsv: String {
         ([header] + rows).map { row in
@@ -544,13 +584,23 @@ struct TableBlockView: View {
 
     var body: some View {
         let widths = columnWidths()
+        let display = table.displayHeader
         VStack(alignment: .leading, spacing: 10) {
             HStack {
-                Text("Tabulka")
-                    .font(.subheadline.weight(.semibold))
-                Text("\(table.rows.count) \(Self.rowsLabel(table.rows.count))")
-                    .font(.subheadline)
-                    .foregroundStyle(.secondary)
+                VStack(alignment: .leading, spacing: 2) {
+                    HStack(spacing: 6) {
+                        Text("Tabulka")
+                            .font(.subheadline.weight(.semibold))
+                        Text("\(table.rows.count) \(Self.rowsLabel(table.rows.count))")
+                            .font(.subheadline)
+                            .foregroundStyle(.secondary)
+                    }
+                    if let unit = display.unit {
+                        Text("Hodnoty v \(unit)")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                }
                 Spacer()
                 ShareLink(
                     item: CodeFile(name: fileName, code: table.csv),
@@ -587,7 +637,7 @@ struct TableBlockView: View {
                 Grid(alignment: .topLeading, horizontalSpacing: 0, verticalSpacing: 0) {
                     GridRow {
                         ForEach(table.header.indices, id: \.self) { column in
-                            cell(table.header[column], column: column, width: widths[column])
+                            cell(display.header[column], column: column, width: widths[column])
                                 .font(.subheadline.weight(.semibold))
                         }
                     }
@@ -634,8 +684,9 @@ struct TableBlockView: View {
     private func columnWidths() -> [CGFloat] {
         let body = UIFont.preferredFont(forTextStyle: .subheadline)
         let bold = UIFont.systemFont(ofSize: body.pointSize, weight: .semibold)
+        let header = table.displayHeader.header
         return table.header.indices.map { column in
-            var widest = Self.measure(MarkdownTable.plain(table.header[column]), font: bold)
+            var widest = Self.measure(MarkdownTable.plain(header[column]), font: bold)
             for row in table.rows {
                 widest = max(widest, Self.measure(MarkdownTable.plain(row[column]), font: body))
             }

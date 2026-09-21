@@ -123,8 +123,9 @@ struct MessageRow: View {
                     )
                 }
                 if !message.text.isEmpty {
-                    CollapsibleText(text: message.text, markdown: true)
-                        .lineSpacing(3)
+                    // Bloky kódu jsou ve vlastním okně s tlačítkem Kopírovat,
+                    // celou odpověď jde dál zkopírovat podržením textu.
+                    MessageContentView(text: message.text)
                         .contextMenu { copyButton }
                 } else if isStreaming && message.reasoning.isEmpty && message.status.isEmpty {
                     TypingIndicator()

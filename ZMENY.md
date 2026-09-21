@@ -1,3 +1,21 @@
+# Kód v odpovědi ve vlastním okně
+
+`Views/MessageContentView.swift` (nový): odpověď se dělí na bloky. Blok ```jazyk … ```
+se ukáže v okně s názvem jazyka („HTML“, „JavaScript“, bez jazyka „Plain text“),
+tlačítkem Kopírovat (po zkopírování na chvíli fajfka + haptika) a neproporcionálním
+písmem bez zalamování – dlouhé řádky se posouvají do strany. Kód nad 40 řádků se sbalí
+na 20 s tlačítkem „Zobrazit celý kód“; rozepsaný blok (během generování) je vidět celý.
+Nadpisy `#`–`######` a oddělovače `---` se vykreslí jako nadpis a čára místo syrových
+značek. Podržením odpovědi jde dál zkopírovat celý text.
+
+Vedle kopírování je tlačítko **Uložit** (`ShareLink` + `CodeFile: Transferable`): kód se
+až po klepnutí zapíše do dočasného souboru a otevře se nabídka sdílení – Uložit do
+Souborů, AirDrop, jiná appka. Název souboru se vezme z textu před blokem („ulož jako
+`snake.html`“) nebo z prvního řádku kódu, jinak `kod.<přípona podle jazyka>`
+(`kod-2.js` u dalšího bloku stejného typu). Během generování je tlačítko neaktivní.
+
+---
+
 # Výběr llama.cpp v buildu IPA + předvolby podle typu modelu
 
 ## Workflow

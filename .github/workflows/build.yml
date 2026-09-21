@@ -5,14 +5,13 @@
 # u tagu v* se přiloží i k GitHub Release. Podpis řeší až sideload.
 
 name: Build IPA
+run-name: Build IPA · ${{ inputs.configuration || 'Release' }} · llama.cpp ${{ inputs.llama || 'automaticky' }}
 
+# Build se spouští jen ručně (Actions › Build IPA › Run workflow), nebo tagem v* pro Release.
+# Push na main ani pull request build nespouští – na macOS runneru se minuty počítají.
 on:
   push:
-    branches: [main]
     tags: ["v*"]
-    paths-ignore: ["**.md"]
-  pull_request:
-    paths-ignore: ["**.md"]
   workflow_dispatch:
     inputs:
       configuration:
@@ -20,8 +19,19 @@ on:
         type: choice
         options: [Release, Debug]
         default: Release
+      llama:
+        description: >-
+          llama.cpp XCFramework. Zkompilované varianty vytváří workflow
+          „llama.cpp XCFramework (optimalizovaný)“ – když vybraná neexistuje, build hned skončí.
+        type: choice
+        default: automaticky
+        options:
+          - automaticky
+          - originální b10894
+          - b10894 · GGML_CPU_ARM_ARCH=armv8.6-a+dotprod+i8mm · GGML_BLAS=ON
+          - b10894 · GGML_CPU_ARM_ARCH=armv8.6-a+dotprod+i8mm · GGML_BLAS=OFF
 
-# Nový push na stejnou větev zruší rozběhnutý build – na macOS runneru se minuty počítají.
+# Druhý ručně spuštěný build na stejné větvi zruší ten rozběhnutý.
 concurrency:
   group: build-${{ github.ref }}
   cancel-in-progress: true
@@ -45,6 +55,72 @@ jobs:
           # Číslo buildu je počet commitů a marketingová verze se bere z tagu v* –
           # s mělkým klonem (výchozí depth 1) by vyšlo 1 a tag by se nenašel.
           fetch-depth: 0
+
+      # Varianta llama.cpp podle výběru. Zkompilované leží v Releases „llama-cpu-opt-blas-on“
+      # a „llama-cpu-opt-blas-off“ (workflow llama-xcframework.yml); starší Release „llama-cpu-opt“
+      # se použije, když odpovídá vybranému BLAS. Package.swift pozná zkompilovanou variantu
+      # podle složky Packages/LlamaCpp/llama.xcframework, bez ní vezme oficiální XCFramework.
+      # „automaticky“ (i u tagu) = zkompilovaná s BLAS ON, když existuje, jinak oficiální.
+      - name: Vybrat llama.cpp
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CHOICE: ${{ inputs.llama || 'automaticky' }}
+        run: |
+          OFFICIAL="$(grep -oE 'download/b[0-9]+' Packages/LlamaCpp/Package.swift | head -1 | cut -d/ -f2)"
+          case "$CHOICE" in
+            *"GGML_BLAS=ON"*)  WANT=ON ;;
+            *"GGML_BLAS=OFF"*) WANT=OFF ;;
+            originální*)       WANT=official ;;
+            *)                 WANT=auto ;;
+          esac
+
+          # Stáhne XCFramework z Release $1, když jeho BLAS odpovídá $2.
+          # Starší Release bez údaje o BLAS byl přeložený s výchozím ON.
+          use_release() {
+            local tag="$1" blas="$2" notes actual
+            notes="$(gh release view "$tag" --repo "$GITHUB_REPOSITORY" --json body -q .body 2>/dev/null)" || return 1
+            actual="$(grep -oE 'GGML_BLAS=(ON|OFF)' <<<"$notes" | head -1 | cut -d= -f2)"
+            [ "${actual:-ON}" = "$blas" ] || return 1
+            rm -rf /tmp/llama Packages/LlamaCpp/llama.xcframework
+            gh release download "$tag" --repo "$GITHUB_REPOSITORY" --pattern llama.xcframework.zip -D /tmp/llama || return 1
+            ditto -x -k /tmp/llama/llama.xcframework.zip Packages/LlamaCpp/
+            [ -d Packages/LlamaCpp/llama.xcframework ] || { echo "::error::V Release $tag chybí llama.xcframework"; exit 1; }
+            LLAMA_BUILD="${notes#llama.cpp }"
+            case "$LLAMA_BUILD" in *GGML_BLAS=*) ;; *) LLAMA_BUILD="$LLAMA_BUILD · GGML_BLAS=ON" ;; esac
+            echo "Release $tag"
+          }
+
+          compiled() {
+            local tag="llama-cpu-opt-blas-$(tr '[:upper:]' '[:lower:]' <<<"$1")"
+            use_release "$tag" "$1" || use_release llama-cpu-opt "$1"
+          }
+
+          LLAMA_BUILD=""
+          case "$WANT" in
+            ON|OFF)
+              if ! compiled "$WANT"; then
+                echo "::error::Zkompilovaný llama.cpp s GGML_BLAS=$WANT neexistuje. Spusť nejdřív workflow „llama.cpp XCFramework (optimalizovaný)“ s blas=$WANT, nebo vyber originální."
+                exit 1
+              fi
+              # Popisek ve výběru je napevno – když Release nese jinou verzi, ať je to vidět.
+              LABEL_VER="$(grep -oE 'b[0-9]+' <<<"$CHOICE" | head -1 || true)"
+              REAL_VER="$(grep -oE 'b[0-9]+' <<<"$LLAMA_BUILD" | head -1 || true)"
+              if [ -n "$LABEL_VER" ] && [ -n "$REAL_VER" ] && [ "$LABEL_VER" != "$REAL_VER" ]; then
+                echo "::warning::Vybráno $LABEL_VER, zkompilovaný Release je ale $REAL_VER – použije se $REAL_VER."
+              fi
+              ;;
+            auto)
+              compiled ON || true
+              ;;
+          esac
+          if [ -z "$LLAMA_BUILD" ]; then
+            rm -rf Packages/LlamaCpp/llama.xcframework
+            LLAMA_BUILD="$OFFICIAL (oficiální)"
+          fi
+
+          echo "llama.cpp: $LLAMA_BUILD"
+          echo "LLAMA_BUILD=$LLAMA_BUILD" >> "$GITHUB_ENV"
+          echo "**llama.cpp:** $LLAMA_BUILD" >> "$GITHUB_STEP_SUMMARY"
 
       # iOS 26 SDK (Liquid Glass, FoundationModels) je jen v Xcode 26+.
       # Vybere nejnovější stabilní Xcode 26.x, betu jen když jiný není.
@@ -75,20 +151,6 @@ jobs:
           path: .build/SourcePackages
           key: spm-${{ runner.os }}-${{ hashFiles('AIChat.xcodeproj/project.pbxproj', 'Packages/**/Package.swift', '**/Package.resolved') }}
           restore-keys: spm-${{ runner.os }}-
-
-      # Optimalizovaný XCFramework llama.cpp (workflow llama-xcframework.yml), když existuje.
-      # Package.swift ho pozná podle složky Packages/LlamaCpp/llama.xcframework.
-      - name: Optimalizovaný llama.cpp
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          if gh release download llama-cpu-opt --repo "${{ github.repository }}" --pattern llama.xcframework.zip -D /tmp/llama; then
-            ditto -x -k /tmp/llama/llama.xcframework.zip Packages/LlamaCpp/
-            echo "Používám optimalizovaný llama.xcframework"
-            echo "llama.cpp: optimalizovaný XCFramework (Release llama-cpu-opt)" >> "$GITHUB_STEP_SUMMARY"
-          else
-            echo "Release llama-cpu-opt není – oficiální XCFramework"
-          fi
 
       - name: Build
         run: |

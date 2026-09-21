@@ -299,6 +299,143 @@ struct LocalModelSettings: Codable, Equatable, Sendable {
     }
 }
 
+/// Třída lokálního modelu. Každá má vlastní sadu parametrů s vlastní předvolbou –
+/// co je dobré pro MoE streamované z úložiště (málo vláken, velká dávka promptu),
+/// je u hustého GGUF nebo MLX zbytečné nebo škodlivé.
+enum LocalModelClass: String, Codable, CaseIterable, Identifiable, Sendable {
+    /// GGUF s routovanými experty (Qwen3-30B-A3B, Gemma 4 26B-A4B …) – experti z úložiště.
+    case ggufMoE
+    /// Hustý GGUF přes llama.cpp, celý v RAM a na Metalu.
+    case gguf
+    /// MLX, vždy na GPU.
+    case mlx
+
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .ggufMoE: "GGUF · MoE"
+        case .gguf: "GGUF"
+        case .mlx: "MLX"
+        }
+    }
+
+    var symbol: String {
+        switch self {
+        case .ggufMoE: "square.stack.3d.down.right"
+        case .gguf: "cpu"
+        case .mlx: "bolt"
+        }
+    }
+
+    var summary: String {
+        switch self {
+        case .ggufMoE: "llama.cpp, experti MoE z úložiště – hustá část v RAM, výpočet hlavně na CPU."
+        case .gguf: "llama.cpp, celý model v RAM, výpočet na GPU (Metal)."
+        case .mlx: "MLX, celý model v RAM, výpočet vždy na GPU."
+        }
+    }
+
+    /// Třída modelu podle ID. U GGUF rozhoduje skutečný obsah souboru (podíl expertů),
+    /// když hlavičku nejde přečíst, odhadne se z názvu („…-30B-A3B-…“).
+    /// - Returns: třída a jestli je jistá (přečtená ze souboru) – jen jistá se cachuje.
+    static func detect(modelID id: String) -> (modelClass: LocalModelClass, certain: Bool) {
+        if LocalModelFile.kind(forID: id) == .mlx { return (.mlx, true) }
+        #if canImport(llama)
+        let path = ModelPaths.root.appending(path: id).path(percentEncoded: false)
+        if let layout = GGUFLayout.read(path: path) {
+            return (layout.isMoE ? .ggufMoE : .gguf, true)
+        }
+        #endif
+        return (GGUFLayout.looksLikeMoE(fileName: id) ? .ggufMoE : .gguf, false)
+    }
+}
+
+extension LocalModelSettings {
+    /// Výchozí parametry pro třídu modelu.
+    static func preset(for modelClass: LocalModelClass) -> LocalModelSettings {
+        var settings = LocalModelSettings()
+        settings.applyPreset(for: modelClass)
+        return settings
+    }
+
+    /// Parametry enginu a vzorkování nastaví na předvolbu třídy. Společné věci
+    /// (systémový prompt, instrukce a osnovy režimů, práce s přílohami, strop paměti, seed)
+    /// zůstanou, jak jsou.
+    mutating func applyPreset(for modelClass: LocalModelClass) {
+        let shared = self
+        var preset = LocalModelSettings()
+        switch modelClass {
+        case .ggufMoE:
+            // Měřeno na Qwen3-30B-A3B: generování z flash nad tři vlákna zpomaluje (vlákna
+            // si trhají readahead), práce nad dokumentem je při tisících tokenů omezená
+            // výpočtem attention a tam víc vláken pomáhá – proto zvlášť pro extrakci a shrnutí.
+            let generation = min(3, Self.defaultThreads)
+            preset.threads = generation
+            preset.threadsBatch = 0
+            if Self.defaultThreads > generation {
+                preset.threadProfiles = [
+                    TaskProfile.extract.rawValue: Self.defaultThreads,
+                    TaskProfile.summarize.rawValue: Self.defaultThreads,
+                ]
+            }
+            preset.contextLength = 8192
+            preset.gpuLayers = 99
+            preset.streamExperts = true
+            preset.prefetchExperts = true
+            preset.prefaultPages = true
+            preset.prefetchWaveMB = 0
+            preset.prefetchSplitOnly = false
+            preset.repackDense = true
+            preset.streamingGPU = false
+            preset.expertsPerToken = 0
+            preset.ggufKVCache = .f16
+            preset.ggufPrefillBatch = 2048
+            preset.ggufGPUPrefill = false
+            preset.ggufSchedDebug = false
+            preset.adaptivePrefill = true
+        case .gguf:
+            preset.threads = Self.defaultThreads
+            preset.threadsBatch = 0
+            preset.contextLength = 4096
+            preset.gpuLayers = 99
+        case .mlx:
+            preset.contextLength = 4096
+            preset.prefillStep = 1024
+            preset.adaptivePrefill = true
+            preset.kvCacheK = .f16
+            preset.kvCacheV = .f16
+        }
+        preset.copyShared(from: shared)
+        self = preset
+    }
+
+    /// Převezme nastavení, která nezávisí na třídě modelu.
+    mutating func copyShared(from other: LocalModelSettings) {
+        systemPrompt = other.systemPrompt
+        profileMode = other.profileMode
+        instructionProfiles = other.instructionProfiles
+        outlineProfiles = other.outlineProfiles
+        reasoningProfiles = other.reasoningProfiles
+        summarizeLongAttachments = other.summarizeLongAttachments
+        summaryChunkTokens = other.summaryChunkTokens
+        showSources = other.showSources
+        conciseAnswers = other.conciseAnswers
+        sectionRouting = other.sectionRouting
+        agentTools = other.agentTools
+        memoryCapMB = other.memoryCapMB
+        useRandomSeed = other.useRandomSeed
+        seed = other.seed
+    }
+
+    /// Odpovídají parametry předvolbě třídy?
+    func matchesPreset(for modelClass: LocalModelClass) -> Bool {
+        var preset = LocalModelSettings.preset(for: modelClass)
+        preset.copyShared(from: self)
+        return preset == self
+    }
+}
+
 /// Parametry společné pro Claude a Gemini.
 struct CloudSettings: Codable, Equatable, Sendable {
     var claudeModel = "claude-sonnet-5"
@@ -396,10 +533,54 @@ extension CloudSettings {
 @Observable
 final class SettingsStore {
     var provider: AIProvider { didSet { persist() } }
-    var local: LocalModelSettings { didSet { persist() } }
     var cloud: CloudSettings { didSet { persist() } }
     /// ID vybraného lokálního modelu – název souboru .gguf, nebo "mlx:<složka>".
-    var selectedLocalModel: String? { didSet { persist() } }
+    var selectedLocalModel: String? {
+        didSet {
+            localClass = Self.modelClass(for: selectedLocalModel)
+            persist()
+        }
+    }
+
+    /// Parametry lokálních modelů zvlášť pro každou třídu (klíč `LocalModelClass.rawValue`).
+    private(set) var localByClass: [String: LocalModelSettings] { didSet { persist() } }
+    /// Třída vybraného modelu – podle ní se čte a zapisuje `local`.
+    private(set) var localClass: LocalModelClass
+
+    /// Parametry vybraného lokálního modelu (jeho třídy). Zápis uloží hodnoty třídě
+    /// a společná nastavení (prompt, instrukce režimů, přílohy …) propíše i ostatním třídám,
+    /// takže se systémový prompt nemusí psát třikrát.
+    var local: LocalModelSettings {
+        get { localByClass[localClass.rawValue] ?? .preset(for: localClass) }
+        set {
+            var all = localByClass
+            all[localClass.rawValue] = newValue
+            for other in LocalModelClass.allCases where other != localClass {
+                var value = all[other.rawValue] ?? .preset(for: other)
+                value.copyShared(from: newValue)
+                all[other.rawValue] = value
+            }
+            localByClass = all
+        }
+    }
+
+    /// Parametry dané třídy (bez ohledu na vybraný model).
+    func localSettings(for modelClass: LocalModelClass) -> LocalModelSettings {
+        localByClass[modelClass.rawValue] ?? .preset(for: modelClass)
+    }
+
+    /// Vybraný model zpět na předvolbu jeho třídy; společná nastavení zůstanou.
+    func applyPreset() {
+        local.applyPreset(for: localClass)
+    }
+
+    /// Všechny třídy na výchozí předvolby, včetně systémového promptu a instrukcí.
+    func resetAllLocal() {
+        localByClass = Dictionary(uniqueKeysWithValues: LocalModelClass.allCases.map {
+            ($0.rawValue, LocalModelSettings.preset(for: $0))
+        })
+    }
+
     /// Přemýšlení (reasoning) zapnuto/vypnuto zvlášť pro každý model; klíč viz `reasoningKey`.
     private(set) var reasoningPrefs: [String: Bool] { didSet { persist() } }
 
@@ -408,7 +589,10 @@ final class SettingsStore {
 
     private enum Key {
         static let provider = "settings.provider"
+        /// Jedna sada parametrů pro všechny lokální modely (před rozdělením podle třídy).
         static let local = "settings.local"
+        static let localByClass = "settings.localByClass"
+        static let modelClassCache = "settings.modelClassCache"
         static let cloud = "settings.cloud"
         static let selectedModel = "settings.selectedLocalModel"
         static let reasoning = "settings.reasoning"
@@ -418,18 +602,60 @@ final class SettingsStore {
     init() {
         let defaults = UserDefaults.standard
         provider = AIProvider(rawValue: defaults.string(forKey: Key.provider) ?? "") ?? .local
-        local = Self.decode(LocalModelSettings.self, key: Key.local) ?? LocalModelSettings()
-        cloud = Self.decode(CloudSettings.self, key: Key.cloud) ?? CloudSettings()
-        selectedLocalModel = defaults.string(forKey: Key.selectedModel)
-        reasoningPrefs = Self.decode([String: Bool].self, key: Key.reasoning) ?? [:]
+        var byClass = Self.decode([String: LocalModelSettings].self, key: Key.localByClass) ?? [:]
+        if byClass.isEmpty, let legacy = Self.decode(LocalModelSettings.self, key: Key.local) {
+            // Přechod ze společné sady: výchozí hodnoty byly laděné na MoE z úložiště,
+            // takže ji dostane MoE celou. Hustý GGUF a MLX začnou od své předvolby,
+            // převezmou jen společná nastavení a upravené vzorkování režimů.
+            byClass[LocalModelClass.ggufMoE.rawValue] = legacy
+            for modelClass in [LocalModelClass.gguf, .mlx] {
+                var value = LocalModelSettings.preset(for: modelClass)
+                value.copyShared(from: legacy)
+                value.profiles = legacy.profiles
+                byClass[modelClass.rawValue] = value
+            }
+        }
+        let shared = byClass.values.first
+        for modelClass in LocalModelClass.allCases where byClass[modelClass.rawValue] == nil {
+            var value = LocalModelSettings.preset(for: modelClass)
+            if let shared { value.copyShared(from: shared) }
+            byClass[modelClass.rawValue] = value
+        }
         // Jednorázový návrat na f16: kvantovaná KV cache se krátce posílala jako výchozí
         // a uložila se do nastavení. Změna výchozí hodnoty v kódu na uložená data nesáhne.
         if !defaults.bool(forKey: Key.kvCacheReset) {
-            local.kvCacheK = .f16
-            local.kvCacheV = .f16
+            for key in byClass.keys {
+                byClass[key]?.kvCacheK = .f16
+                byClass[key]?.kvCacheV = .f16
+            }
             defaults.set(true, forKey: Key.kvCacheReset)
         }
+        localByClass = byClass
+        cloud = Self.decode(CloudSettings.self, key: Key.cloud) ?? CloudSettings()
+        let selected = defaults.string(forKey: Key.selectedModel)
+        selectedLocalModel = selected
+        localClass = Self.modelClass(for: selected)
+        reasoningPrefs = Self.decode([String: Bool].self, key: Key.reasoning) ?? [:]
         refreshConnections()
+        // Výsledek přechodu na sady podle třídy uložit hned, ne až při první změně.
+        persist()
+    }
+
+    // MARK: - Třída modelu
+
+    /// Třída modelu s cache v UserDefaults – hlavička velkého GGUF se tak nečte při každém
+    /// startu appky. Cachuje se jen jistý výsledek (přečtený ze souboru), odhad z názvu ne.
+    private static func modelClass(for id: String?) -> LocalModelClass {
+        guard let id else { return .gguf }
+        let defaults = UserDefaults.standard
+        var cache = defaults.dictionary(forKey: Key.modelClassCache) as? [String: String] ?? [:]
+        if let raw = cache[id], let cached = LocalModelClass(rawValue: raw) { return cached }
+        let detected = LocalModelClass.detect(modelID: id)
+        if detected.certain {
+            cache[id] = detected.modelClass.rawValue
+            defaults.set(cache, forKey: Key.modelClassCache)
+        }
+        return detected.modelClass
     }
 
     // MARK: - API klíče
@@ -653,7 +879,7 @@ final class SettingsStore {
     private func persist() {
         let defaults = UserDefaults.standard
         defaults.set(provider.rawValue, forKey: Key.provider)
-        defaults.set(try? JSONEncoder().encode(local), forKey: Key.local)
+        defaults.set(try? JSONEncoder().encode(localByClass), forKey: Key.localByClass)
         defaults.set(try? JSONEncoder().encode(cloud), forKey: Key.cloud)
         defaults.set(selectedLocalModel, forKey: Key.selectedModel)
         defaults.set(try? JSONEncoder().encode(reasoningPrefs), forKey: Key.reasoning)

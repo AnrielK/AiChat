@@ -3,22 +3,30 @@ import SwiftUI
 struct LocalModelSettingsView: View {
     @Environment(SettingsStore.self) private var settings
     @State private var confirmReset = false
+    @State private var confirmPreset = false
     @State private var editedProfile: TaskProfile = .extract
     @State private var storageResults: [StorageBenchmark.Result] = []
     @State private var measuringStorage = false
 
     private let contextOptions = [1024, 2048, 4096, 8192, 16384, 32768, 65536, 131_072]
 
-    /// Přesnost KV cache se nabízí jen u MLX modelů.
-    private var isMLXSelected: Bool {
-        settings.selectedLocalModel.map { LocalModelFile.kind(forID: $0) == .mlx } ?? false
+    /// Třída vybraného modelu – podle ní se ukazují jen parametry, které na model působí.
+    /// nil = žádný model není vybraný, zobrazí se jen společná nastavení.
+    private var modelClass: LocalModelClass? {
+        settings.selectedLocalModel == nil ? nil : settings.localClass
     }
+    private var isMLX: Bool { modelClass == .mlx }
+    private var isGGUF: Bool { modelClass == .gguf || modelClass == .ggufMoE }
+    private var isMoE: Bool { modelClass == .ggufMoE }
+    /// MoE s experty z úložiště – jen tehdy platí dávka promptu, KV cache pro CPU a předčítání.
+    private var isStreaming: Bool { isMoE && settings.local.streamExperts }
 
     var body: some View {
         @Bindable var settings = settings
 
         Form {
-            if let id = settings.selectedLocalModel {
+            if let id = settings.selectedLocalModel, let modelClass {
+                presetSection(modelClass)
                 Section {
                     Toggle(isOn: reasoningBinding(key: "local:" + id)) {
                         Label("Přemýšlení", systemImage: "brain")
@@ -27,6 +35,12 @@ struct LocalModelSettingsView: View {
                     Text(LocalModelFile.displayName(forID: id))
                 } footer: {
                     Text("Hlavní přepínač pro tento model. Přemýšlí třeba Qwen 3, Qwen 3.5 nebo DeepSeek R1 – vypnutím odpoví hned, ale u složitých úloh méně přesně. U modelů, které nepřemýšlejí, přepínač nic nemění. Když je zapnutý, o přemýšlení u každé zprávy rozhoduje režim: výchozí je zapnuté pro extrakci a shrnutí, vypnuté pro běžný chat.")
+                }
+            } else {
+                Section {
+                    Label("Není vybraný žádný lokální model", systemImage: "questionmark.circle")
+                } footer: {
+                    Text("Vyber model v Modelech v zařízení – pak se tu ukážou i parametry pro jeho typ (GGUF MoE, GGUF nebo MLX). Zatím jsou vidět jen společná nastavení.")
                 }
             }
 
@@ -84,9 +98,10 @@ struct LocalModelSettingsView: View {
                         .foregroundStyle(.secondary)
                 }
 
-                // Jen pro MLX. GGUF přes llama.cpp jede vždy ve f16 – kvantovaná KV cache
-                // tam na Metalu produkuje nesmysly, takže se volba vůbec nenabízí.
-                if !isMLXSelected && settings.local.streamExperts {
+                // KV cache a dávka promptu u GGUF jen pro MoE z úložiště – výpočet tam běží
+                // na CPU, kde je kvantovaná cache spolehlivá. Hustý GGUF na Metalu jede vždy
+                // ve f16 (kvantovaná tam dává nesmysly) a dávku má pevnou.
+                if isStreaming {
                     Picker("KV cache (MoE z úložiště)", selection: $settings.local.ggufKVCache) {
                         ForEach(KVCachePrecision.allCases) { Text($0.title).tag($0) }
                     }
@@ -102,7 +117,7 @@ struct LocalModelSettingsView: View {
                         .foregroundStyle(.secondary)
                     Toggle("Zmenšit prefill při plné paměti", isOn: $settings.local.adaptivePrefill)
                 }
-                if isMLXSelected {
+                if isMLX {
                     Picker("Prefill po krocích", selection: $settings.local.prefillStep) {
                         ForEach([512, 1024, 2048, 3072, 4096], id: \.self) { Text("\($0) tokenů").tag($0) }
                     }
@@ -120,63 +135,19 @@ struct LocalModelSettingsView: View {
                 if let limited = LocalRuntime.shared.memoryLimitedContext {
                     Text("Delší kontext si pamatuje víc z konverzace a z příloh, ale spotřebuje víc paměti. Na nastavenou délku posledně nestačila paměť, model běžel s kontextem \(limited) tokenů – appka ho zkracuje sama, aby ji iOS neukončil.")
                 } else {
-                    Text("Delší kontext si pamatuje víc z konverzace a z příloh, ale spotřebuje víc paměti a zpomalí začátek odpovědi. Když na něj paměť nestačí, appka ho sama zkrátí – kolik se vejde, ukáže sekce Paměť níže a ukazatel kontextu v chatu. Starší zprávy, které se nevejdou, se vynechají.\(!isMLXSelected && settings.local.streamExperts ? "\n\nKV cache u MoE z úložiště: při streamování expertů běží výpočet celý na CPU, kde je kvantovaná KV cache spolehlivá (na GPU dává nesmysly, proto se jinde nenabízí). q8 ji zmenší na polovinu – u Qwen3-30B-A3B je to při 16k kontextu skoro 800 MB, které zůstanou fyzické RAM na experty. To je přímo vidět na rychlosti: čím víc expertů se vejde do page cache, tím míň se jich čte z flash." : "")\(isMLXSelected ? "\n\nPrefill po krocích určuje, po kolika tokenech se zpracovává prompt. Větší krok líp vytíží GPU a zkrátí čekání na první slovo u dlouhých příloh, ale zvedne špičku paměti.\n\nSe zapnutým zmenšováním si appka před každou odpovědí změří, kolik paměti drží: nad 80 % limitu použije poloviční krok, nad 90 % jede na 512 tokenech. Ta jedna odpověď je pomalejší, ale nespadne.\n\nKV cache je paměť, ve které si model drží celý kontext – půlka na klíče (K), půlka na hodnoty (V). Snížením přesnosti se do stejné paměti vejde delší kontext: q8 příslušnou půlku zmenší na polovinu, q4 na čtvrtinu. MLX kvantuje obě půlky společně, takže se projeví až nastavení obou naráz; když je jedna na f16, nekvantuje se vůbec." : "")")
+                    Text("Delší kontext si pamatuje víc z konverzace a z příloh, ale spotřebuje víc paměti a zpomalí začátek odpovědi. Když na něj paměť nestačí, appka ho sama zkrátí – kolik se vejde, ukáže sekce Paměť níže a ukazatel kontextu v chatu. Starší zprávy, které se nevejdou, se vynechají.\(isStreaming ? "\n\nKV cache u MoE z úložiště: při streamování expertů běží výpočet celý na CPU, kde je kvantovaná KV cache spolehlivá (na GPU dává nesmysly, proto se jinde nenabízí). q8 ji zmenší na polovinu – u Qwen3-30B-A3B je to při 16k kontextu skoro 800 MB, které zůstanou fyzické RAM na experty. To je přímo vidět na rychlosti: čím víc expertů se vejde do page cache, tím míň se jich čte z flash." : "")\(isMLX ? "\n\nPrefill po krocích určuje, po kolika tokenech se zpracovává prompt. Větší krok líp vytíží GPU a zkrátí čekání na první slovo u dlouhých příloh, ale zvedne špičku paměti.\n\nSe zapnutým zmenšováním si appka před každou odpovědí změří, kolik paměti drží: nad 80 % limitu použije poloviční krok, nad 90 % jede na 512 tokenech. Ta jedna odpověď je pomalejší, ale nespadne.\n\nKV cache je paměť, ve které si model drží celý kontext – půlka na klíče (K), půlka na hodnoty (V). Snížením přesnosti se do stejné paměti vejde delší kontext: q8 příslušnou půlku zmenší na polovinu, q4 na čtvrtinu. MLX kvantuje obě půlky společně, takže se projeví až nastavení obou naráz; když je jedna na f16, nekvantuje se vůbec." : "")")
                 }
             }
 
             memorySection
 
-            Section {
-                Toggle("Akcelerace GPU (Metal)", isOn: gpuEnabled)
-                if settings.local.gpuLayers > 0 {
-                    Stepper(value: $settings.local.gpuLayers, in: 1...999) {
-                        LabeledContent("Vrstev na GPU", value: settings.local.gpuLayers >= 99 ? "všechny" : "\(settings.local.gpuLayers)")
-                    }
-                }
-                Stepper(value: $settings.local.threads, in: 1...ProcessInfo.processInfo.activeProcessorCount) {
-                    LabeledContent("Vlákna – generování", value: "\(settings.local.threads)")
-                }
-                Stepper(value: $settings.local.threadsBatch, in: 0...ProcessInfo.processInfo.activeProcessorCount) {
-                    LabeledContent("Vlákna – prompt") {
-                        Text(settings.local.threadsBatch == 0
-                             ? "stejně (\(settings.local.threads))"
-                             : "\(settings.local.threadsBatch)")
-                    }
-                }
-                Toggle("Experty MoE z úložiště", isOn: $settings.local.streamExperts)
-                Stepper(value: $settings.local.expertsPerToken, in: 0...maxExpertsPerToken) {
-                    LabeledContent("Aktivních expertů") {
-                        Text(settings.local.expertsPerToken == 0 ? "podle modelu" : "\(settings.local.expertsPerToken)")
-                    }
-                }
-                .disabled(!settings.local.streamExperts)
-                Toggle("Předčítat experty", isOn: $settings.local.prefetchExperts)
-                    .disabled(!settings.local.streamExperts)
-                if settings.local.prefetchExperts {
-                    Toggle("Mapovat stránky předem", isOn: $settings.local.prefaultPages)
-                        .disabled(!settings.local.streamExperts || settings.local.prefetchSplitOnly)
-                    if settings.local.prefaultPages {
-                        Picker("Předčítat po vlnách", selection: $settings.local.prefetchWaveMB) {
-                            Text("vypnuto").tag(0)
-                            ForEach([8, 16, 32, 64], id: \.self) { Text("\($0) MB").tag($0) }
-                        }
-                        .disabled(!settings.local.streamExperts || settings.local.prefetchSplitOnly)
-                    }
-                    Toggle("Vypsat dělení grafu (diagnostika)", isOn: $settings.local.ggufSchedDebug)
-                    Toggle("Jen dělit graf (bez čtení)", isOn: $settings.local.prefetchSplitOnly)
-                        .disabled(!settings.local.streamExperts)
-                }
-                Toggle("Rychlá jádra pro hustou část", isOn: $settings.local.repackDense)
-                    .disabled(!settings.local.streamExperts)
-                Toggle("GPU pro hustou část MoE", isOn: $settings.local.streamingGPU)
-                    .disabled(!settings.local.streamExperts || settings.local.gpuLayers == 0)
-            } header: {
-                Text("Výkon (jen GGUF)")
-            } footer: {
-                Text("MLX běží vždy na GPU a tato nastavení nepoužívá. Změna GPU vrstev znovu načte GGUF model.\n\nVlákna zvlášť pro generování a pro prompt: u MoE z úložiště mají obě fáze jiné optimum. Generování čte na token jen experty jedné volby routeru a víc vláken si u výpadků stránek navzájem trhá readahead okna na kusy – nad tři vlákna rychlost klesá. Zpracování promptu sahá na desítky expertů v každé vrstvě a je omezené spíš počtem operací úložiště než jeho propustností, takže na počtu vláken skoro nezáleží. Nula znamená stejnou hodnotu jako u generování.\n\nAktivních expertů: kolik jich smí router v každé vrstvě vybrat. Kolik se toho na token přečte z flash, je na tomhle čísle přímo úměrné – u Qwen3-30B-A3B je osm expertů ve 48 vrstvách asi 1 GB na token, šest expertů tři čtvrtiny, čtyři polovina. Model je ale na svoje top-k trénovaný, takže snížením klesá kvalita: 8→6 bývá skoro bez rozdílu, 8→4 už znát je. Změna znovu načte model.\n\nExperty MoE z úložiště: u modelů jako Qwen3-30B-A3B nebo Gemma 4 26B-A4B leží v RAM jen hustá část (attention, embeddingy) a routované experty si iOS čte z flash, až je router potřebuje. Model tak nemusí celý zabírat RAM. Běží na CPU, na rychlost má velký vliv počet vláken. U modelů bez expertů se nic nemění.\n\nPředčítat experty: jakmile router vrstvy vybere experty, appka je paralelně načte z flash po celých blocích, místo aby je výpočet dotahoval stránku po stránce. Mapovat stránky předem: předčtené stránky se paralelně namapují do procesu, aby je výpočet nemapoval po jedné sám.\n\nPředčítat po vlnách: místo aby se naráz ohlásily všechny experty vrstvy, ohlásí se jen kus, počká se na jeho načtení a teprve pak jde další. Zpracování promptu sahá na desítky expertů na vrstvu, ohlásí tím přes 100 MB naráz a z úložiště pak dostává jednu 16kB stránku na operaci místo pěti – readahead se u takového objemu neuplatní a prefill je omezený počtem operací, ne propustností. Měření na iPhonu ale ukázalo, že na velikosti vlny nezáleží – prefill dostával jednu stránku na operaci při 8, 16, 32 i 64 MB stejně jako bez vln. Výchozí je proto vypnuto, volba zůstává jen pro pokusy na jiném hardwaru. Jen dělit graf (bez čtení) je diagnostika: výpočet se zastavuje ve vrstvách stejně jako při předčítání, ale nic se nečte – porovnáním s vypnutým předčítáním se změří, kolik stojí samotné zastavování.\n\nRychlá jádra pro hustou část: attention a výstupní vrstva se při načtení přebalí pro optimalizované ARM instrukce. Stojí asi 1 GB RAM navíc a načtení trvá déle.\n\nGPU pro hustou část MoE: jen pro pokusy. Na iPhonu je výpočet jen na CPU rychlejší – střídání CPU a GPU v každé vrstvě stojí víc, než GPU ušetří. Funguje jen se souborem přeuspořádaným skriptem tools/gguf_moe_reorder.py.")
+            if isGGUF {
+                performanceSection
             }
 
-            storageSection
+            if isMoE {
+                storageSection
+            }
 
             Section {
                 Toggle("Náhodný seed", isOn: $settings.local.useRandomSeed)
@@ -204,9 +175,11 @@ struct LocalModelSettingsView: View {
             }
 
             Section {
-                Button("Obnovit výchozí hodnoty", role: .destructive) {
+                Button("Obnovit vše na výchozí", role: .destructive) {
                     confirmReset = true
                 }
+            } footer: {
+                Text("Vrátí předvolby všech typů modelů (GGUF MoE, GGUF, MLX) včetně systémového promptu a instrukcí režimů.")
             }
         }
         .navigationTitle("Parametry")
@@ -216,8 +189,114 @@ struct LocalModelSettingsView: View {
             if let fixed = settings.local.profileMode.fixedProfile { editedProfile = fixed }
         }
         .confirmationDialog("Obnovit všechny parametry na výchozí hodnoty?", isPresented: $confirmReset, titleVisibility: .visible) {
-            Button("Obnovit", role: .destructive) { settings.local = LocalModelSettings() }
+            Button("Obnovit", role: .destructive) { settings.resetAllLocal() }
         }
+        .confirmationDialog("Použít předvolbu \(settings.localClass.title)?", isPresented: $confirmPreset, titleVisibility: .visible) {
+            Button("Použít předvolbu") { settings.applyPreset() }
+        } message: {
+            Text("Parametry enginu a vzorkování pro \(settings.localClass.title) se vrátí na doporučené. Systémový prompt, instrukce režimů a nastavení příloh zůstanou.")
+        }
+    }
+
+    // MARK: - Předvolba
+
+    /// Typ modelu, stav předvolby a tlačítko na návrat k ní.
+    private func presetSection(_ modelClass: LocalModelClass) -> some View {
+        let matches = settings.local.matchesPreset(for: modelClass)
+        return Section {
+            LabeledContent {
+                Text(matches ? "předvolba" : "upraveno")
+                    .foregroundStyle(matches ? Color.secondary : Color.orange)
+            } label: {
+                Label(modelClass.title, systemImage: modelClass.symbol)
+            }
+            if !matches {
+                Button("Použít předvolbu \(modelClass.title)", systemImage: "wand.and.stars") {
+                    confirmPreset = true
+                }
+            }
+        } header: {
+            Text("Typ modelu")
+        } footer: {
+            Text(modelClass.summary + " Parametry se ukládají zvlášť pro GGUF MoE, GGUF a MLX – přepnutím na model jiného typu se načte jeho sada. Systémový prompt, instrukce režimů a nastavení příloh jsou společné. Níže jsou jen parametry, které na tento typ modelu působí.")
+        }
+    }
+
+    // MARK: - Výkon (GGUF)
+
+    private var performanceSection: some View {
+        @Bindable var settings = settings
+        let local = settings.local
+
+        return Section {
+            Toggle("Akcelerace GPU (Metal)", isOn: gpuEnabled)
+            if local.gpuLayers > 0 && (!isMoE || !local.streamExperts || local.streamingGPU) {
+                Stepper(value: $settings.local.gpuLayers, in: 1...999) {
+                    LabeledContent("Vrstev na GPU", value: local.gpuLayers >= 99 ? "všechny" : "\(local.gpuLayers)")
+                }
+            }
+            Stepper(value: $settings.local.threads, in: 1...ProcessInfo.processInfo.activeProcessorCount) {
+                LabeledContent("Vlákna – generování", value: "\(local.threads)")
+            }
+            Stepper(value: $settings.local.threadsBatch, in: 0...ProcessInfo.processInfo.activeProcessorCount) {
+                LabeledContent("Vlákna – prompt") {
+                    Text(local.threadsBatch == 0
+                         ? "stejně (\(local.threads))"
+                         : "\(local.threadsBatch)")
+                }
+            }
+            if isMoE {
+                Toggle("Experty MoE z úložiště", isOn: $settings.local.streamExperts)
+            }
+            if isStreaming {
+                Stepper(value: $settings.local.expertsPerToken, in: 0...maxExpertsPerToken) {
+                    LabeledContent("Aktivních expertů") {
+                        Text(local.expertsPerToken == 0 ? "podle modelu" : "\(local.expertsPerToken)")
+                    }
+                }
+                Toggle("Předčítat experty", isOn: $settings.local.prefetchExperts)
+                if local.prefetchExperts {
+                    if !local.prefetchSplitOnly {
+                        Toggle("Mapovat stránky předem", isOn: $settings.local.prefaultPages)
+                        if local.prefaultPages {
+                            Picker("Předčítat po vlnách", selection: $settings.local.prefetchWaveMB) {
+                                Text("vypnuto").tag(0)
+                                ForEach([8, 16, 32, 64], id: \.self) { Text("\($0) MB").tag($0) }
+                            }
+                        }
+                    }
+                    Toggle("Vypsat dělení grafu (diagnostika)", isOn: $settings.local.ggufSchedDebug)
+                    Toggle("Jen dělit graf (bez čtení)", isOn: $settings.local.prefetchSplitOnly)
+                }
+                Toggle("Rychlá jádra pro hustou část", isOn: $settings.local.repackDense)
+                if local.gpuLayers > 0 {
+                    Toggle("GPU pro hustou část MoE", isOn: $settings.local.streamingGPU)
+                }
+            }
+        } header: {
+            Text("Výkon – \(isMoE ? "GGUF MoE" : "GGUF")")
+        } footer: {
+            Text(performanceFooter)
+        }
+    }
+
+    /// Nápověda jen k tomu, co je v sekci Výkon právě vidět.
+    private var performanceFooter: String {
+        var parts = ["Změna GPU vrstev znovu načte model."]
+        if isMoE {
+            parts.append("Vlákna zvlášť pro generování a pro prompt: u MoE z úložiště mají obě fáze jiné optimum. Generování čte na token jen experty jedné volby routeru a víc vláken si u výpadků stránek navzájem trhá readahead okna na kusy – nad tři vlákna rychlost klesá. Zpracování promptu sahá na desítky expertů v každé vrstvě a je omezené spíš počtem operací úložiště než jeho propustností, takže na počtu vláken skoro nezáleží. Nula znamená stejnou hodnotu jako u generování.")
+            parts.append("Experty MoE z úložiště: v RAM leží jen hustá část (attention, embeddingy) a routované experty si iOS čte z flash, až je router potřebuje. Model tak nemusí celý zabírat RAM. Běží na CPU, na rychlost má velký vliv počet vláken. Vypnutím se model načte celý do RAM jako hustý GGUF.")
+        } else {
+            parts.append("Hustý model leží celý v RAM a počítá se na GPU – vlákna CPU se uplatní hlavně při vypnuté akceleraci a u vrstev, které na GPU nejsou. Nula u vláken pro prompt znamená stejnou hodnotu jako u generování.")
+        }
+        if isStreaming {
+            parts.append("Aktivních expertů: kolik jich smí router v každé vrstvě vybrat. Kolik se toho na token přečte z flash, je na tomhle čísle přímo úměrné – u Qwen3-30B-A3B je osm expertů ve 48 vrstvách asi 1 GB na token, šest expertů tři čtvrtiny, čtyři polovina. Model je ale na svoje top-k trénovaný, takže snížením klesá kvalita: 8→6 bývá skoro bez rozdílu, 8→4 už znát je. Změna znovu načte model.")
+            parts.append("Předčítat experty: jakmile router vrstvy vybere experty, appka je paralelně načte z flash po celých blocích, místo aby je výpočet dotahoval stránku po stránce. Mapovat stránky předem: předčtené stránky se paralelně namapují do procesu, aby je výpočet nemapoval po jedné sám.")
+            parts.append("Předčítat po vlnách: místo aby se naráz ohlásily všechny experty vrstvy, ohlásí se jen kus a počká se na jeho načtení. Měření na iPhonu ukázalo, že na velikosti vlny nezáleží – prefill dostával jednu stránku na operaci při 8, 16, 32 i 64 MB stejně jako bez vln. Výchozí je proto vypnuto, volba zůstává jen pro pokusy na jiném hardwaru. Jen dělit graf (bez čtení) je diagnostika: výpočet se zastavuje ve vrstvách stejně jako při předčítání, ale nic se nečte – porovnáním s vypnutým předčítáním se změří, kolik stojí samotné zastavování.")
+            parts.append("Rychlá jádra pro hustou část: attention a výstupní vrstva se při načtení přebalí pro optimalizované ARM instrukce. Stojí asi 1 GB RAM navíc a načtení trvá déle.")
+            parts.append("GPU pro hustou část MoE: jen pro pokusy. Na iPhonu je výpočet jen na CPU rychlejší – střídání CPU a GPU v každé vrstvě stojí víc, než GPU ušetří. Funguje jen se souborem přeuspořádaným skriptem tools/gguf_moe_reorder.py.")
+        }
+        return parts.joined(separator: "\n\n")
     }
 
     // MARK: - Vzorkování
@@ -243,10 +322,12 @@ struct LocalModelSettingsView: View {
             }
             SliderRow(title: "Penalizace opakování", value: parameters.repeatPenalty, range: 1...2, step: 0.01)
 
-            Stepper(value: threadsBinding(editedProfile), in: 0...ProcessInfo.processInfo.activeProcessorCount) {
-                LabeledContent("Vlákna CPU") {
-                    let value = settings.local.threadProfiles[editedProfile.rawValue] ?? 0
-                    Text(value == 0 ? "podle Výkonu (\(settings.local.threads))" : "\(value)")
+            if isGGUF {
+                Stepper(value: threadsBinding(editedProfile), in: 0...ProcessInfo.processInfo.activeProcessorCount) {
+                    LabeledContent("Vlákna CPU") {
+                        let value = settings.local.threadProfiles[editedProfile.rawValue] ?? 0
+                        Text(value == 0 ? "podle Výkonu (\(settings.local.threads))" : "\(value)")
+                    }
                 }
             }
             Toggle(isOn: reasoningBinding(editedProfile)) {
@@ -272,11 +353,25 @@ struct LocalModelSettingsView: View {
         } header: {
             Text("Vzorkování – \(editedProfile.title)")
         } footer: {
-            Text(editedProfile.note
-                 + " Nižší teplota dává přesnější a předvídatelnější odpovědi, vyšší kreativnější."
-                 + " Přemýšlení v tomto režimu platí jen pro modely, které to umí, a jen když je zapnuté i hlavním přepínačem u modelu nahoře."
-                 + " Vlákna CPU přebíjejí hodnotu z Výkonu jen v tomto režimu a mění se za běhu, takže to nezahodí rozpracovaný chat. U MoE z úložiště se totiž s délkou kontextu mění úzké hrdlo: krátký chat brzdí čtení z flash a nad tři vlákna zpomaluje, práce nad dokumentem je při tisících tokenů omezená hlavně výpočtem attention a tam víc vláken pomáhá. Nula znamená společnou hodnotu.")
+            Text(samplingFooter)
         }
+    }
+
+    /// Nápověda k vzorkování – věty o vláknech jen u GGUF, kde se vlákna nastavují.
+    private var samplingFooter: String {
+        var text = editedProfile.note
+        text += " Nižší teplota dává přesnější a předvídatelnější odpovědi, vyšší kreativnější."
+        text += " Přemýšlení v tomto režimu platí jen pro modely, které to umí, a jen když je zapnuté i hlavním přepínačem u modelu nahoře."
+        if isGGUF {
+            text += " Vlákna CPU přebíjejí hodnotu z Výkonu jen v tomto režimu a mění se za běhu, takže to nezahodí rozpracovaný chat."
+        }
+        if isMoE {
+            text += " U MoE z úložiště se totiž s délkou kontextu mění úzké hrdlo: krátký chat brzdí čtení z flash a nad tři vlákna zpomaluje, práce nad dokumentem je při tisících tokenů omezená hlavně výpočtem attention a tam víc vláken pomáhá."
+        }
+        if isGGUF {
+            text += " Nula znamená společnou hodnotu."
+        }
+        return text
     }
 
     /// Vlákna pro jeden režim; 0 znamená společnou hodnotu z Výkonu.

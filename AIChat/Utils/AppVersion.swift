@@ -16,6 +16,10 @@ enum AppVersion {
     /// Commit, ze kterého build vznikl. `+` na konci znamená, že strom nebyl čistý.
     static var commit: String? { string("GitCommit") }
 
+    /// Varianta llama.cpp, se kterou se appka sestavila („b10894 · GGML_CPU_ARM_ARCH=… ·
+    /// GGML_BLAS=ON“, nebo „b10894 (oficiální)“). Zapisuje ji `make-ipa.sh`.
+    static var llama: String? { string("LlamaBuild") }
+
     /// Kdy build vznikl, v místním čase.
     static var built: String? {
         guard let raw = string("BuildDate") else { return nil }

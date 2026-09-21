@@ -79,6 +79,17 @@ VERSION_SETTINGS=(CURRENT_PROJECT_VERSION="$BUILD_NUMBER")
 [ -n "$MARKETING_VERSION" ] && VERSION_SETTINGS+=(MARKETING_VERSION="$MARKETING_VERSION")
 echo "▸ verze ${MARKETING_VERSION:-(z projektu)} ($BUILD_NUMBER)${GIT_COMMIT:+ · commit $GIT_COMMIT}"
 
+# Varianta llama.cpp do Nastavení › Verze. Na CI ji předá krok „Vybrat llama.cpp“
+# (LLAMA_BUILD), lokálně se pozná podle toho, co Package.swift použije.
+if [ -z "${LLAMA_BUILD:-}" ]; then
+  if [ -d Packages/LlamaCpp/llama.xcframework ]; then
+    LLAMA_BUILD="vlastní XCFramework (Packages/LlamaCpp/llama.xcframework)"
+  else
+    LLAMA_BUILD="$(grep -oE 'download/b[0-9]+' Packages/LlamaCpp/Package.swift | head -1 | cut -d/ -f2) (oficiální)"
+  fi
+fi
+echo "▸ llama.cpp $LLAMA_BUILD"
+
 echo "▸ build $SCHEME ($CONFIGURATION, iphoneos)"
 xcodebuild \
   -project "$PROJECT" \
@@ -145,6 +156,8 @@ plist_set() {
 }
 [ -n "$GIT_COMMIT" ] && plist_set GitCommit "$GIT_COMMIT"
 plist_set BuildDate "$BUILD_DATE"
+# plutil místo PlistBuddy – hodnota obsahuje mezery a „·“.
+plutil -replace LlamaBuild -string "$LLAMA_BUILD" "$APP_PATH/Info.plist"
 
 ENTITLEMENTS="Sideload.entitlements"
 echo "▸ ad-hoc podpis s entitlementy ($ENTITLEMENTS)"

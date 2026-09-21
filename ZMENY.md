@@ -1,3 +1,39 @@
+# Výběr llama.cpp v buildu IPA + předvolby podle typu modelu
+
+## Workflow
+
+- **`build.yml`** se spouští jen ručně a tagem `v*` – push na `main` a pull requesty
+  build nespouští. Nová volba **llama**: *automaticky*, *originální b10894*,
+  *b10894 · GGML_CPU_ARM_ARCH=armv8.6-a+dotprod+i8mm · GGML_BLAS=ON / OFF*.
+  Zkompilovaná varianta se bere z Release `llama-cpu-opt-blas-on|off` (starší
+  `llama-cpu-opt` se použije, když sedí BLAS). Když vybraná neexistuje, build skončí
+  hned po checkoutu, ne po půlhodině. Jiná verze v Release než v popisku = varování.
+- **`llama-xcframework.yml`** nahrává každou variantu BLAS do vlastního Release, takže
+  ON i OFF můžou existovat vedle sebe; volba *obojí* je přeloží paralelně.
+- **`make-ipa.sh`** zapisuje variantu do `Info.plist` (`LlamaBuild`), appka ji ukáže
+  v Nastavení pod verzí.
+
+## Parametry podle typu modelu
+
+`SettingsStore` drží tři sady `LocalModelSettings` – **GGUF MoE**, **GGUF**, **MLX**.
+`settings.local` čte a zapisuje sadu vybraného modelu, takže zbytek kódu se nezměnil.
+Typ se u GGUF pozná z hlavičky souboru (`GGUFLayout.isMoE`), výsledek se cachuje.
+Společné zůstává: systémový prompt, instrukce a osnovy režimů, přemýšlení v režimech,
+práce s přílohami, strop paměti, seed.
+
+Předvolby: MoE – 3 vlákna na generování (víc na extrakci a shrnutí), kontext 8k,
+experti z úložiště, předčítání, dávka 2048. GGUF – vlákna podle CPU, kontext 4k, vše
+na GPU. MLX – kontext 4k, prefill 1024, KV f16.
+
+Parametry zobrazují jen to, co na model působí: MLX nevidí Výkon ani vlákna,
+hustý GGUF nevidí experty, KV cache pro CPU ani měření úložiště. Nahoře je typ modelu,
+stav „předvolba / upraveno“ a tlačítko na návrat k předvolbě.
+
+Přechod: stávající nastavení dostane celé GGUF MoE (výchozí hodnoty byly laděné na něj),
+GGUF a MLX začnou od předvolby se společnými věcmi a vzorkováním převzatým.
+
+---
+
 # Stop sekvence + agentní smyčka
 
 Dvě nové věci nad rámec XBRL práce. První dává smysl sáma o sobě, druhá na ní stojí.

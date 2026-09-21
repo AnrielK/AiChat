@@ -85,6 +85,13 @@ struct SettingsView: View {
                     if let commit = AppVersion.commit {
                         LabeledContent("Commit", value: commit)
                     }
+                    if let llama = AppVersion.llama {
+                        LabeledContent("llama.cpp") {
+                            Text(llama.replacingOccurrences(of: " · ", with: "\n"))
+                                .multilineTextAlignment(.trailing)
+                                .font(.footnote)
+                        }
+                    }
                     if let built = AppVersion.built {
                         LabeledContent("Sestaveno", value: built)
                     }

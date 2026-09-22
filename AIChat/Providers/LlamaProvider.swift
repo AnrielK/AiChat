@@ -224,7 +224,9 @@ actor LlamaEngine {
         let signature = [
             "\(requested)", "\(flash)", kvPrecision.rawValue, "\(promptBatch)", "\(gpuPrefill)",
             "\(settings.ggufSchedDebug)",
-            "\(streamedLayout != nil)", "\(settings.prefetchExperts)"
+            // Callback se instaluje jen při vytvoření kontextu – rozhoduje, jestli vůbec běží,
+            // ne co dělá. Přepnutí záznamu při zapnutém předčítání kontext (a KV cache) nezahodí.
+            "\(streamedLayout != nil)", "\(settings.prefetchExperts || settings.recordExpertTrace)"
         ].joined(separator: "|")
         if signature != contextSignature { releaseContext() }
 
@@ -318,15 +320,22 @@ actor LlamaEngine {
         )
         onEvent(.usage(usage))
 
-        let activePrefetcher = settings.prefetchExperts ? prefetcher : nil
+        // Callback běží i s vypnutým předčítáním, když se zaznamenává trace – pak jen měří
+        // a zapisuje výběr routeru, nic nečte.
+        let activePrefetcher = settings.prefetchExperts || settings.recordExpertTrace ? prefetcher : nil
+        prefetcher?.setTracing(activePrefetcher != nil && settings.recordExpertTrace)
+        activePrefetcher?.readEnabled = settings.prefetchExperts
+        // Záznam na disk i při zrušení nebo chybě – useknutá odpověď je pořád platná trace.
+        defer { activePrefetcher?.flushTrace() }
         activePrefetcher?.splitOnly = settings.prefetchSplitOnly
         activePrefetcher?.prefaultPages = settings.prefaultPages
         activePrefetcher?.waveBytes = settings.prefetchWaveMB * 1_048_576
         let waveNote = settings.prefaultPages && settings.prefetchWaveMB > 0
             ? " po \(settings.prefetchWaveMB) MB" : ""
-        let prefetchMode = activePrefetcher == nil ? "vyp"
+        let traceNote = settings.recordExpertTrace && activePrefetcher != nil ? " · záznam expertů" : ""
+        let prefetchMode = (activePrefetcher == nil || !settings.prefetchExperts ? "vyp"
             : settings.prefetchSplitOnly ? "jen dělení grafu"
-            : settings.prefaultPages ? "zap + mapování stránek" + waveNote : "zap"
+            : settings.prefaultPages ? "zap + mapování stránek" + waveNote : "zap") + traceNote
         _ = activePrefetcher?.takeStats()
 
         // Diagnostika dělení grafu mezi CPU a GPU. `ggml_backend_sched` si proměnnou čte při
@@ -454,8 +463,11 @@ actor LlamaEngine {
         let reusedNote = reused > 0 ? " · \(reused) tokenů z KV cache" : ""
         Self.log.notice("prefill \(decoded) z \(tokens.count) tokenů za \(Self.decimal(prefillSeconds)) s" + reusedNote)
         Self.logPages("prefill", MemoryBudget.PageCounters.now.since(prefillPages), tokens: max(1, decoded))
-        if let stats = activePrefetcher?.takeStats(), !settings.prefetchSplitOnly {
-            Self.logPrefetch("prefill", stats, total: prefillSeconds)
+        if let stats = activePrefetcher?.takeStats() {
+            if settings.prefetchExperts, !settings.prefetchSplitOnly {
+                Self.logPrefetch("prefill", stats, total: prefillSeconds)
+            }
+            Self.logResidency("prefill", stats)
         }
         let decodeStart = Date.now
         let decodePages = MemoryBudget.PageCounters.now
@@ -521,7 +533,10 @@ actor LlamaEngine {
                 """)
             Self.logPages("generování", MemoryBudget.PageCounters.now.since(decodePages), tokens: usage.outputTokens)
             if let stats = activePrefetcher?.takeStats() {
-                if settings.prefetchSplitOnly {
+                Self.logResidency("generování", stats)
+                if !settings.prefetchExperts {
+                    // Callback běží jen kvůli záznamu – předčítání není co hlásit.
+                } else if settings.prefetchSplitOnly {
                     Self.log.notice("graf rozdělen \(stats.layers)× (\(usage.outputTokens > 0 ? stats.layers / usage.outputTokens : 0)× na token), experti se nečetli")
                 } else {
                     Self.logPrefetch("generování", stats, total: seconds)
@@ -537,6 +552,20 @@ actor LlamaEngine {
             \(phase): předčteno \(stats.experts) expertů ve \(stats.layers) vrstvách, \
             \(megabytes) MB za \(decimal(stats.seconds)) s \
             (\(decimal(share, digits: 0)) % z \(decimal(total)) s)
+            """)
+    }
+
+    /// Zásah page cache expertů změřený před předčtením (jen se zapnutým záznamem trace).
+    /// „Rezidentní“ znamená, že expert ležel v cache celý – co dotáhlo až předčítání, se
+    /// nepočítá, stejně jako „TRUE resident hit rate“ v kimi-k3-in-c.
+    private static func logResidency(_ phase: String, _ stats: ExpertPrefetcher.Stats) {
+        guard stats.measuredExperts > 0 else { return }
+        let hitRate = Double(stats.residentExperts) / Double(stats.measuredExperts) * 100
+        let byteRate = stats.measuredBytes > 0 ? Double(stats.residentBytes) / Double(stats.measuredBytes) * 100 : 0
+        log.notice("""
+            \(phase): zásah cache expertů \(decimal(hitRate, digits: 1)) % \
+            (\(stats.residentExperts) z \(stats.measuredExperts) celých v RAM, \
+            \(decimal(byteRate, digits: 0)) % bajtů) · měření \(decimal(stats.measuredSeconds * 1_000, digits: 0)) ms
             """)
     }
 

@@ -207,6 +207,10 @@ struct LocalModelSettings: Codable, Equatable, Sendable {
     /// že se readahead ztrácí kvůli objemu ohlášenému naráz, tím padla. Volba zůstává
     /// jen pro pokusy na jiném hardwaru.
     var prefetchWaveMB = 0
+    /// Zaznamenávat, které experty router vybírá, a měřit zásah page cache (`mincore`).
+    /// Záznam jde v Parametrech přehrát v simulátoru cache (`ExpertCacheSimulator`) nebo na
+    /// počítači nástrojem `tools/expert_cache_sim.py`. Diagnostika, proto mimo předvolby.
+    var recordExpertTrace = false
     /// Hustou část streamovaného MoE počítat na GPU. Na iPhonu je jen CPU rychlejší
     /// (střídání CPU a GPU v každé vrstvě), proto výchozí vypnuto.
     var streamingGPU = false
@@ -424,6 +428,7 @@ extension LocalModelSettings {
         sectionRouting = other.sectionRouting
         agentTools = other.agentTools
         memoryCapMB = other.memoryCapMB
+        recordExpertTrace = other.recordExpertTrace
         useRandomSeed = other.useRandomSeed
         seed = other.seed
     }
@@ -482,6 +487,7 @@ extension LocalModelSettings {
         prefetchSplitOnly = try container.decodeIfPresent(Bool.self, forKey: .prefetchSplitOnly) ?? prefetchSplitOnly
         prefaultPages = try container.decodeIfPresent(Bool.self, forKey: .prefaultPages) ?? prefaultPages
         prefetchWaveMB = try container.decodeIfPresent(Int.self, forKey: .prefetchWaveMB) ?? prefetchWaveMB
+        recordExpertTrace = try container.decodeIfPresent(Bool.self, forKey: .recordExpertTrace) ?? recordExpertTrace
         streamingGPU = try container.decodeIfPresent(Bool.self, forKey: .streamingGPU) ?? streamingGPU
         repackDense = try container.decodeIfPresent(Bool.self, forKey: .repackDense) ?? repackDense
         expertsPerToken = try container.decodeIfPresent(Int.self, forKey: .expertsPerToken) ?? expertsPerToken

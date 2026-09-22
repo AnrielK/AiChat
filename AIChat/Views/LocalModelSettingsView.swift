@@ -268,6 +268,12 @@ struct LocalModelSettingsView: View {
                     Toggle("Vypsat dělení grafu (diagnostika)", isOn: $settings.local.ggufSchedDebug)
                     Toggle("Jen dělit graf (bez čtení)", isOn: $settings.local.prefetchSplitOnly)
                 }
+                Toggle("Zaznamenávat experty", isOn: $settings.local.recordExpertTrace)
+                NavigationLink {
+                    ExpertTraceListView()
+                } label: {
+                    Label("Simulace cache expertů", systemImage: "chart.bar.doc.horizontal")
+                }
                 Toggle("Rychlá jádra pro hustou část", isOn: $settings.local.repackDense)
                 if local.gpuLayers > 0 {
                     Toggle("GPU pro hustou část MoE", isOn: $settings.local.streamingGPU)
@@ -293,6 +299,7 @@ struct LocalModelSettingsView: View {
             parts.append("Aktivních expertů: kolik jich smí router v každé vrstvě vybrat. Kolik se toho na token přečte z flash, je na tomhle čísle přímo úměrné – u Qwen3-30B-A3B je osm expertů ve 48 vrstvách asi 1 GB na token, šest expertů tři čtvrtiny, čtyři polovina. Model je ale na svoje top-k trénovaný, takže snížením klesá kvalita: 8→6 bývá skoro bez rozdílu, 8→4 už znát je. Změna znovu načte model.")
             parts.append("Předčítat experty: jakmile router vrstvy vybere experty, appka je paralelně načte z flash po celých blocích, místo aby je výpočet dotahoval stránku po stránce. Mapovat stránky předem: předčtené stránky se paralelně namapují do procesu, aby je výpočet nemapoval po jedné sám.")
             parts.append("Předčítat po vlnách: místo aby se naráz ohlásily všechny experty vrstvy, ohlásí se jen kus a počká se na jeho načtení. Měření na iPhonu ukázalo, že na velikosti vlny nezáleží – prefill dostával jednu stránku na operaci při 8, 16, 32 i 64 MB stejně jako bez vln. Výchozí je proto vypnuto, volba zůstává jen pro pokusy na jiném hardwaru. Jen dělit graf (bez čtení) je diagnostika: výpočet se zastavuje ve vrstvách stejně jako při předčítání, ale nic se nečte – porovnáním s vypnutým předčítáním se změří, kolik stojí samotné zastavování.")
+            parts.append("Zaznamenávat experty: appka si zapisuje, které experty router v každé vrstvě vybral, a před předčtením změří, kolik z nich už leželo v paměti (zásah page cache, píše se do Logu enginu). Záznam jde v Simulaci cache expertů přehrát pro různé velikosti cache a politiky – bez spouštění modelu, protože výběr routeru na cache nezávisí. Měření stojí jednotky milisekund na token. Když je předčítání vypnuté, výpočet se kvůli záznamu stejně zastavuje za výběrem expertů jako při předčítání, jen se nic nečte.")
             parts.append("Rychlá jádra pro hustou část: attention a výstupní vrstva se při načtení přebalí pro optimalizované ARM instrukce. Stojí asi 1 GB RAM navíc a načtení trvá déle.")
             parts.append("GPU pro hustou část MoE: jen pro pokusy. Na iPhonu je výpočet jen na CPU rychlejší – střídání CPU a GPU v každé vrstvě stojí víc, než GPU ušetří. Funguje jen se souborem přeuspořádaným skriptem tools/gguf_moe_reorder.py.")
         }

@@ -1,3 +1,31 @@
+# MoE: záznam výběru expertů, skutečný zásah cache a simulace
+
+Převzato z [kimi-k3-in-c](https://github.com/FareedKhan-dev/kimi-k3-in-c), sekce 12–13 a „The cache
+that was not participating“. Samotná LRU aréna odtamtud se nepřebírá: Kimi násobí experty z vlastní
+paměti, tady je llama.cpp násobí přímo z mmapu a roli LRU cache hraje page cache iOS. Přenáší se měření
+a analýza:
+
+- **Skutečný zásah cache.** `ExpertPrefetcher` před předčtením zavolá `mincore` nad vlastním mapováním
+  souboru a spočítá, kolik vybraných expertů leží v page cache celých. Po prefillu a po generování jde do
+  Logu enginu řádek „zásah cache expertů X % (N z M celých v RAM, Y % bajtů)“. Expert, kterému chybí
+  jediná stránka, se jako zásah nepočítá, protože i jedna chybějící stránka znamená čekání na flash.
+- **Záznam (trace).** Každý výběr routeru (vrstva, velikost dávky, experti, kolik jich bylo v cache)
+  jde do `Documents/ExpertTraces/<model>-<čas>.axtr`, jeden soubor na načtený model. Formát je popsaný
+  v `ExpertTrace.swift`. Zapisuje se po odpovědi, v callbacku se jen plní buffer.
+- **Simulace** (Parametry › Výkon › Simulace cache expertů). Záznam se přehraje pro 0,25–6 GB a politiky
+  LRU / LFU / Belady, plus strop povinných výpadků a podíl nejčastějších 10 % expertů. Počítá se
+  generování, prefill cache jen zahřívá. Záznam jde sdílet a na počítači přehrát nástrojem
+  `tools/expert_cache_sim.py` (bez balíčků) se stejným výpočtem a vlastními velikostmi.
+- Přepínač **Zaznamenávat experty** je mimo předvolby. S vypnutým předčítáním callback běží jen kvůli
+  záznamu a nic nečte. Změna záznamu při zapnutém předčítání nezahodí kontext ani KV cache.
+
+Ověřeno: politiky Python nástroje odpovídají naivním implementacím LRU/LFU/Belady (300 náhodných
+posloupností) a na syntetickém záznamu (48 vrstev × 128 expertů, 8 na token) vychází LRU pod 1 GB
+na 0 %, přesně podle cyklického průchodu vrstvami. Swift část je napsaná, ale nepřeložená, takže
+první build v Xcode je její kontrola.
+
+---
+
 # FinFill: list Segments – tržby po segmentech, trzích a regionech
 
 Nový list **Segments** (v novém sešitu hned za IncomeStatement, v existujícím se při zápisu

@@ -38,8 +38,18 @@ final class ExpertPrefetcher: @unchecked Sendable {
     private static let topkPrefix = Array("ffn_moe_topk-".utf8CString.dropLast())
 
     private let fd: Int32
+    private let path: String
     private let layers: [Int: [GGUFLayout.ExpertTensor]]
     private let expertCount: Int
+
+    /// Předčítat vybrané experty. Vypnuté jen tehdy, když callback běží kvůli záznamu trace
+    /// a předčítání je v nastavení vypnuté – pak se jen měří a zapisuje, nic se nečte.
+    var readEnabled = true
+    /// Záznam výběru routeru (viz `ExpertTrace`). nil = nezaznamenává se.
+    private var traceWriter: ExpertTraceWriter?
+    /// Buffer pro `mincore` – callback běží v jednom vlákně, stačí jeden.
+    private var residencyVector: [CChar] = []
+    private var residencyFailed = false
 
     // Statistiky jedné odpovědi (callback běží synchronně ve vlákně llama_decode).
     private let stats = OSAllocatedUnfairLock(initialState: Stats())
@@ -80,6 +90,14 @@ final class ExpertPrefetcher: @unchecked Sendable {
         var experts = 0
         var bytes = 0
         var seconds = 0.0
+        /// Zásah page cache změřený přes `mincore` ještě před předčtením – jen při záznamu trace.
+        /// Obdoba „TRUE resident hit rate“ z kimi-k3-in-c: expert se počítá jako zásah, jen když
+        /// v cache leží celý. Hity, které by obsloužilo až předčítání, se sem nepočítají.
+        var measuredExperts = 0
+        var residentExperts = 0
+        var measuredBytes = 0
+        var residentBytes = 0
+        var measuredSeconds = 0.0
     }
 
     init?(path: String, layout: GGUFLayout) {
@@ -87,6 +105,7 @@ final class ExpertPrefetcher: @unchecked Sendable {
         let fd = open(path, O_RDONLY)
         guard fd >= 0 else { return nil }
         self.fd = fd
+        self.path = path
         self.layers = layout.expertTensors
         self.expertCount = layout.expertCount
         var offsets: [String: Int] = [:]
@@ -122,6 +141,36 @@ final class ExpertPrefetcher: @unchecked Sendable {
         }
     }
 
+    /// Zapne nebo vypne záznam trace. Jeden soubor na načtený model – navazující odpovědi
+    /// se připisují do stejného, protože page cache mezi nimi přetrvává a simulace to má vidět.
+    /// Volat mezi odpověďmi, ne během výpočtu.
+    func setTracing(_ enabled: Bool) {
+        if !enabled {
+            traceWriter?.flush()
+            traceWriter = nil
+            return
+        }
+        guard traceWriter == nil else { return }
+        let layerCount = (layers.keys.max() ?? -1) + 1
+        var slices = [Int](repeating: 0, count: layerCount)
+        for (layer, tensors) in layers {
+            slices[layer] = tensors.reduce(0) { $0 + $1.bytes / expertCount }
+        }
+        traceWriter = ExpertTraceWriter(
+            modelName: (path as NSString).lastPathComponent,
+            expertCount: expertCount,
+            sliceBytes: slices,
+            residencyMeasured: ownMap != nil && !residencyFailed
+        )
+    }
+
+    /// Zapíše nasbíraný záznam na disk (po odpovědi, mimo výpočet).
+    func flushTrace() {
+        traceWriter?.flush()
+    }
+
+    var traceFile: URL? { traceWriter?.url }
+
     // MARK: - Callback
 
     /// Z uzlu násobení experty (src[0] = tenzor expertů v mmapu) dopočítá adresu mmapu souboru.
@@ -152,12 +201,36 @@ final class ExpertPrefetcher: @unchecked Sendable {
     }
 
     fileprivate func handle(_ tensor: UnsafeMutablePointer<ggml_tensor>) {
-        if splitOnly {
+        // Bez záznamu zůstává „jen dělit graf“ čistá diagnostika – nic dalšího se nedělá,
+        // aby měření ceny samotného dělení nezkreslilo čtení výběru routeru.
+        if splitOnly && traceWriter == nil {
             stats.withLock { $0.layers += 1 }
             return
         }
         guard let layer = layerIndex(tensor), let tensors = layers[layer],
               let selected = selectedExperts(tensor), !selected.isEmpty else { return }
+        let batchTokens = Int(tensor.pointee.ne.1)
+
+        // Záznam a zásah cache – musí se změřit před předčtením, jinak by vyšel vždy 100 %.
+        if let traceWriter {
+            let measureStart = Date.now
+            let measured = residency(of: selected, in: tensors)
+            traceWriter.append(layer: layer, tokens: batchTokens, experts: selected, resident: measured?.experts)
+            if let measured {
+                let elapsed = Date.now.timeIntervalSince(measureStart)
+                stats.withLock {
+                    $0.measuredExperts += selected.count
+                    $0.residentExperts += measured.experts
+                    $0.measuredBytes += measured.totalBytes
+                    $0.residentBytes += measured.residentBytes
+                    $0.measuredSeconds += elapsed
+                }
+            }
+        }
+        if splitOnly || !readEnabled {
+            stats.withLock { $0.layers += 1 }
+            return
+        }
 
         let start = Date.now
         let fallback = useReadFallback
@@ -165,7 +238,6 @@ final class ExpertPrefetcher: @unchecked Sendable {
         // nejde (viz `ownMap`), sáhne se na vlastní mapování: výpočet si stránku ještě jednou
         // namapuje, ale už nečeká na flash. To se vyplatí jen u velkých dávek, viz
         // `ownMapMinBatch` – při generování se dvojí mapování nevrátí.
-        let batchTokens = Int(tensor.pointee.ne.1)
         let fallbackBase = batchTokens >= Self.ownMapMinBatch ? ownMap : nil
         let base = prefaultPages ? (mappingBase ?? fallbackBase) : nil
         // Vlny mají smysl jen s mapováním stránek: `F_RDADVISE` je asynchronní, takže bez
@@ -251,6 +323,54 @@ final class ExpertPrefetcher: @unchecked Sendable {
             $0.bytes += bytes
             $0.seconds += seconds
         }
+    }
+
+    /// Kolik z vybraných expertů leží v page cache, zjištěno přes `mincore` nad vlastním
+    /// mapováním souboru. Na Darwinu mapování i čtení z deskriptoru sdílí jeden VM objekt
+    /// souboru, takže `mincore` hlásí stránky, které jsou v cache, i když je tohle mapování
+    /// ještě nikdy nedotklo. Nic se tím nečte ani nemapuje.
+    ///
+    /// Expert je zásah, jen když leží v cache celý (všechny tři tenzory, všechny stránky):
+    /// jediná chybějící stránka znamená čekání na flash uprostřed násobení.
+    private func residency(
+        of selected: [Int],
+        in tensors: [GGUFLayout.ExpertTensor]
+    ) -> (experts: Int, residentBytes: Int, totalBytes: Int)? {
+        guard let ownMap, ownMapBytes > 0, !residencyFailed else { return nil }
+        let pageMask = Self.pageSize - 1
+        var residentExperts = 0
+        var residentBytes = 0
+        var totalBytes = 0
+        for expert in selected {
+            var whole = true
+            for expertTensor in tensors {
+                let slice = expertTensor.bytes / expertCount
+                guard slice > 0 else { continue }
+                let start = expertTensor.fileOffset + expert * slice
+                let end = start + slice
+                guard end <= ownMapBytes else { return nil }
+                let alignedStart = start & ~pageMask
+                let pages = (end - alignedStart + pageMask) / Self.pageSize
+                if residencyVector.count < pages {
+                    residencyVector = [CChar](repeating: 0, count: pages)
+                }
+                let status = residencyVector.withUnsafeMutableBufferPointer { vector in
+                    mincore(ownMap + alignedStart, end - alignedStart, vector.baseAddress)
+                }
+                guard status == 0 else {
+                    residencyFailed = true
+                    Self.log.warning("mincore nefunguje (errno \(errno)) – zásah cache expertů se neměří")
+                    return nil
+                }
+                var incore = 0
+                for page in 0..<pages where residencyVector[page] & 1 != 0 { incore += 1 }
+                if incore < pages { whole = false }
+                totalBytes += slice
+                residentBytes += min(slice, incore * Self.pageSize)
+            }
+            if whole { residentExperts += 1 }
+        }
+        return (residentExperts, residentBytes, totalBytes)
     }
 
     /// Sáhne na každou stránku rozsahu – jádro ji namapuje do procesu (a když ještě není

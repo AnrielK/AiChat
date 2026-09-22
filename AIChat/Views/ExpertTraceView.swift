@@ -1,0 +1,187 @@
+import SwiftUI
+
+/// Záznamy výběru expertů (`ExpertTrace`) – seznam, smazání, sdílení a simulace cache.
+struct ExpertTraceListView: View {
+    @State private var files: [TraceFile] = []
+
+    struct TraceFile: Identifiable, Hashable {
+        let url: URL
+        let size: Int
+        let modified: Date
+        var id: URL { url }
+    }
+
+    var body: some View {
+        List {
+            if files.isEmpty {
+                ContentUnavailableView(
+                    "Žádné záznamy",
+                    systemImage: "waveform.path.ecg",
+                    description: Text("Zapni v Parametrech › Výkon „Zaznamenávat experty“ a pošli modelu pár zpráv. Záznam vzniká jen u MoE modelu s experty z úložiště.")
+                )
+            }
+            ForEach(files) { file in
+                NavigationLink {
+                    ExpertTraceDetailView(url: file.url)
+                } label: {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(file.url.deletingPathExtension().lastPathComponent)
+                            .font(.subheadline)
+                            .lineLimit(2)
+                        Text("\(file.modified.formatted(date: .abbreviated, time: .shortened)) · \(ByteCountFormatter.string(fromByteCount: Int64(file.size), countStyle: .file))")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+            }
+            .onDelete { offsets in
+                for index in offsets { try? FileManager.default.removeItem(at: files[index].url) }
+                files.remove(atOffsets: offsets)
+            }
+        }
+        .navigationTitle("Záznamy expertů")
+        .onAppear(perform: reload)
+        .refreshable { reload() }
+    }
+
+    private func reload() {
+        let keys: [URLResourceKey] = [.fileSizeKey, .contentModificationDateKey]
+        let urls = (try? FileManager.default.contentsOfDirectory(
+            at: ExpertTrace.directory,
+            includingPropertiesForKeys: keys
+        )) ?? []
+        files = urls
+            .filter { $0.pathExtension == ExpertTrace.fileExtension }
+            .map { url in
+                let values = try? url.resourceValues(forKeys: Set(keys))
+                return TraceFile(url: url, size: values?.fileSize ?? 0, modified: values?.contentModificationDate ?? .distantPast)
+            }
+            .sorted { $0.modified > $1.modified }
+    }
+}
+
+/// Výsledek přehrání jednoho záznamu.
+struct ExpertTraceDetailView: View {
+    let url: URL
+    @State private var report: ExpertCacheSimulator.Report?
+    @State private var failure: String?
+
+    var body: some View {
+        Form {
+            if let failure {
+                Label(failure, systemImage: "exclamationmark.triangle")
+                    .foregroundStyle(.orange)
+            } else if let report {
+                if report.requests == 0 {
+                    Text("Záznam zatím neobsahuje žádný výběr expertů.")
+                        .foregroundStyle(.secondary)
+                } else {
+                    summarySection(report)
+                    tableSection(report)
+                }
+            } else {
+                HStack {
+                    ProgressView()
+                    Text("Přehrávám záznam…")
+                }
+            }
+        }
+        .navigationTitle("Simulace cache")
+        .navigationBarTitleDisplayMode(.inline)
+        .toolbar {
+            ToolbarItem(placement: .primaryAction) {
+                ShareLink(item: url)
+            }
+        }
+        .task(id: url) { await load() }
+    }
+
+    private func load() async {
+        let url = url
+        let task = Task.detached(priority: .userInitiated) { () throws -> ExpertCacheSimulator.Report in
+            let trace = try ExpertTrace(contentsOf: url)
+            return ExpertCacheSimulator.run(trace)
+        }
+        do {
+            report = try await task.value
+        } catch {
+            failure = error.localizedDescription
+        }
+    }
+
+    // MARK: - Sekce
+
+    private func summarySection(_ report: ExpertCacheSimulator.Report) -> some View {
+        Section {
+            LabeledContent("Model", value: report.modelName)
+            LabeledContent("Požadavky na experty") {
+                Text(report.decodeRequests > 0
+                     ? "\(report.requests) (\(report.decodeRequests) při generování)"
+                     : "\(report.requests)")
+            }
+            if report.decodeTokens > 0 {
+                LabeledContent("Vygenerováno tokenů", value: "\(report.decodeTokens)")
+            }
+            LabeledContent("Použití experti") {
+                Text("\(report.distinctExperts) z \(report.totalExperts) · \(Self.bytes(report.distinctBytes))")
+            }
+            if let measured = report.measuredHitRate {
+                LabeledContent("Naměřený zásah page cache", value: Self.percent(measured))
+            }
+            if let share = report.topTenthShare {
+                LabeledContent("Nejčastějších 10 % expertů", value: "\(Self.percent(share)) požadavků")
+            }
+            LabeledContent("Strop (povinné výpadky)", value: Self.percent(report.ceilingHitRate))
+        } header: {
+            Text("Záznam")
+        } footer: {
+            Text("Naměřený zásah je skutečnost z iPhonu: kolik vybraných expertů leželo celých v paměti ještě před předčtením (mincore). Strop je nejvíc, co dá jakákoli cache – každého experta je potřeba aspoň jednou přečíst. Podíl nejčastějších 10 % ukazuje, jestli má smysl držet v RAM malou „horkou“ skupinu: u rovnoměrného využití (kolem 10 %) ne.")
+        }
+    }
+
+    private func tableSection(_ report: ExpertCacheSimulator.Report) -> some View {
+        let perToken = report.rows.first?.missBytesPerToken != nil
+        return Section {
+            Grid(alignment: .trailing, horizontalSpacing: 10, verticalSpacing: 8) {
+                GridRow {
+                    Text("Cache").gridColumnAlignment(.leading)
+                    ForEach(ExpertCacheSimulator.Policy.allCases) { Text($0.rawValue) }
+                    if perToken { Text("čtení/tok") }
+                }
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(.secondary)
+                ForEach(report.rows) { row in
+                    GridRow {
+                        Text(row.isAll ? "vše" : Self.bytes(row.capacity))
+                        ForEach(ExpertCacheSimulator.Policy.allCases) { policy in
+                            Text(Self.percent(row.hitRate[policy] ?? 0))
+                        }
+                        if perToken {
+                            Text(Self.bytes(Int(row.missBytesPerToken?[.lru] ?? 0)))
+                        }
+                    }
+                    .font(.footnote)
+                    .monospacedDigit()
+                }
+            }
+        } header: {
+            Text(report.decodeOnly ? "Zásah cache při generování" : "Zásah cache")
+        } footer: {
+            Text("""
+                Záznam se přehraje pro každou velikost cache a politiku. LRU vyhazuje nejdéle nepoužité – tak se zhruba chová page cache iOS. LFU vyhazuje nejméně často použité. Belady zná budoucnost: není to použitelná politika, ale strop pro danou velikost.\(perToken ? " Čtení/tok je objem, který by se s LRU na token četl z flash." : "")
+
+                Velký rozdíl mezi LRU a Belady znamená, že páka je v tom, co v RAM držet, ne kolik RAM na to dát. Nula u LRU pod velikostí jednoho tokenu (u Qwen3-30B-A3B asi 1 GB) není chyba: vrstvy se procházejí pořád dokola ve stejném pořadí a LRU menší než jeden průchod vyhodí každého experta těsně předtím, než ho další token potřebuje.\(report.decodeOnly ? " Počítá se jen generování, prefill cache jen zahřívá." : "")
+
+                Stejný výpočet s vlastními velikostmi: tools/expert_cache_sim.py (záznam pošli přes tlačítko sdílení).
+                """)
+        }
+    }
+
+    private static func percent(_ value: Double) -> String {
+        value.formatted(.percent.precision(.fractionLength(1)))
+    }
+
+    private static func bytes(_ value: Int) -> String {
+        ByteCountFormatter.string(fromByteCount: Int64(value), countStyle: .memory)
+    }
+}

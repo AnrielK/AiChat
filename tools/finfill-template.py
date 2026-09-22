@@ -160,7 +160,9 @@ def style_of(cell):
     b = cell.border
     for key, side in (("bt", b.top), ("bb", b.bottom), ("bl", b.left), ("br", b.right)):
         if side is not None and side.style in BORDER:
-            s[key] = BORDER[side.style]
+            c = color(side.color)
+            # "SOLID#44546A": header borders have the fill color and must stay invisible.
+            s[key] = BORDER[side.style] + (c if c and c.upper() != "#000000" else "")
     return s
 
 

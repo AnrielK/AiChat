@@ -108,6 +108,8 @@ public enum SegmentExtractor {
         for suffix in ["SegmentMember", "SegmentsMember", "Member"] where name.hasSuffix(suffix) && name.count > suffix.count {
             name = String(name.dropLast(suffix.count)); break
         }
+        // AMD: "ComputingandGraphics" – lowercase "and" glued between words.
+        name = name.replacingOccurrences(of: #"([a-z])and([A-Z])"#, with: "$1And$2", options: .regularExpression)
         // Split CamelCase, keep acronyms together: "OEMAndOther" → "OEM And Other".
         var words: [String] = []
         var current = ""
@@ -120,7 +122,9 @@ public enum SegmentExtractor {
             current.append(ch)
         }
         if !current.isEmpty { words.append(current) }
-        return words.joined(separator: " ").replacingOccurrences(of: " And ", with: " & ")
+        return words.joined(separator: " ")
+            .replacingOccurrences(of: " And ", with: " & ")
+            .replacingOccurrences(of: #"\bI ([A-Z][a-z]+)"#, with: "i$1", options: .regularExpression)   // "I Pad" → "iPad"
     }
 }
 
@@ -141,12 +145,12 @@ public enum SegmentSheet {
         func label(_ r: Int, _ text: String, _ fmt: [String: Any] = [:]) { put(r, 1, text.cell(fmt)) }
         func letter(_ c: Int) -> String { A1.column(c) }
 
-        label(1, "Tržby podle segmentů, trhů a regionů (USD mil.)", Fmt.title)
-        for (y, c) in zip(years, cols) {
+        // Header bar like the statements: title in B2, blue fill B2 → last year, years on the right.
+        put(2, 1, "Tržby podle segmentů, trhů a regionů (USD mil.)".cell(Fmt.headerTitle))
+        for c in 2..<(cols.min() ?? 2) { put(2, c, "".cell(Fmt.header)) }
+        for c in cols {
             put(2, c, ["userEnteredValue": ["formulaValue": "=\(incomeSheet)!\(letter(c))2"], "userEnteredFormat": Fmt.header])
-            _ = y
         }
-        put(2, 1, "".cell(Fmt.header))
 
         var r = 4
         for g in groups {
@@ -235,7 +239,8 @@ public enum SegmentSheet {
         static let num: [String: Any] = ["type": "NUMBER", "pattern": "#,##0;(#,##0)"]
         static let pct: [String: Any] = ["type": "PERCENT", "pattern": "0.0%;(0.0%)"]
 
-        static let title: [String: Any] = ["textFormat": ["bold": true, "fontSize": 13]]
+        static let headerTitle: [String: Any] = ["backgroundColorStyle": ["rgbColor": dark], "horizontalAlignment": "LEFT",
+                                                 "textFormat": ["bold": true, "foregroundColorStyle": ["rgbColor": white]]]
         static let header: [String: Any] = ["backgroundColorStyle": ["rgbColor": dark], "horizontalAlignment": "RIGHT",
                                             "textFormat": ["bold": true, "foregroundColorStyle": ["rgbColor": white]]]
         static let group: [String: Any] = ["textFormat": ["bold": true], "borders": ["bottom": line]]

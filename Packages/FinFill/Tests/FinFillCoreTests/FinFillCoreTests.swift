@@ -319,6 +319,12 @@ final class TemplateTests: XCTestCase {
         XCTAssertEqual((cell("DCF", "C6")["userEnteredValue"] as? [String: Any])?["formulaValue"] as? String, "=DATE(2025,12,27)")
         XCTAssertEqual((cell("IncomeStatement", "G2")["userEnteredValue"] as? [String: Any])?["numberValue"] as? Double, 2017)
         XCTAssertEqual((cell("IncomeStatement", "H2")["userEnteredValue"] as? [String: Any])?["formulaValue"] as? String, "=G2+1")
+        // Header bar borders keep the fill color (no black lines between the years).
+        let head = cell("IncomeStatement", "M2")["userEnteredFormat"] as! [String: Any]
+        let right = (head["borders"] as! [String: Any])["right"] as! [String: Any]
+        let rgb = (right["colorStyle"] as! [String: Any])["rgbColor"] as! [String: Double]
+        XCTAssertEqual(rgb["red"]!, 0x44 / 255.0, accuracy: 0.001)
+        XCTAssertEqual(rgb["blue"]!, 0x6A / 255.0, accuracy: 0.001)
         let fmt = cell("IncomeStatement", "O5")["userEnteredFormat"] as? [String: Any]
         XCTAssertEqual((fmt?["numberFormat"] as? [String: Any])?["pattern"] as? String, "#,##0;(#,##0)")
     }
@@ -356,6 +362,12 @@ final class SegmentTests: XCTestCase {
         XCTAssertEqual(SegmentExtractor.label("nvda:ChinaIncludingHongKongMember"), "China Including Hong Kong")
         XCTAssertEqual(SegmentExtractor.label("country:TW"), "Tchaj-wan")
         XCTAssertEqual(SegmentExtractor.label("nvda:DataCenterMember"), "Data Center")
+        XCTAssertEqual(SegmentExtractor.label("amd:ComputingandGraphicsSegmentMember"), "Computing & Graphics")
+        XCTAssertEqual(SegmentExtractor.label("amd:EnterpriseEmbeddedandSemiCustomSegmentMember"), "Enterprise Embedded & Semi Custom")
+        XCTAssertEqual(SegmentExtractor.label("amd:ClientandGamingSegmentMember"), "Client & Gaming")
+        XCTAssertEqual(SegmentExtractor.label("aapl:IPadMember"), "iPad")
+        XCTAssertEqual(SegmentExtractor.label("aapl:IPhoneMember"), "iPhone")
+        XCTAssertEqual(SegmentExtractor.label("aapl:WearablesHomeandAccessoriesMember"), "Wearables Home & Accessories")
     }
 
     func testExtractNVDA() throws {
@@ -397,6 +409,14 @@ final class SegmentTests: XCTestCase {
             return c < vals.count ? vals[c]["userEnteredValue"] as? [String: Any] : nil
         }
         XCTAssertEqual(cell("O2")?["formulaValue"] as? String, "=IncomeStatement!O2")
+        XCTAssertEqual(cell("B2")?["stringValue"] as? String, "Tržby podle segmentů, trhů a regionů (USD mil.)")
+        XCTAssertNil(cell("B1"))
+        // C2:F2 filled like the statements' header bar.
+        let row2 = rows[1]["values"] as! [[String: Any]]
+        for c in 1...14 {
+            let fmt = row2[c]["userEnteredFormat"] as? [String: Any]
+            XCTAssertNotNil(fmt?["backgroundColorStyle"], "column \(A1.column(c))")
+        }
         XCTAssertEqual(cell("B5")?["stringValue"] as? String, "Compute & Networking")
         XCTAssertEqual(cell("O5")?["numberValue"] as? Double, 193479)
         XCTAssertEqual(cell("M6")?["numberValue"] as? Double, 13517)

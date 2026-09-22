@@ -84,10 +84,6 @@ public struct FinFillView: View {
 
     private var optionsSection: some View {
         Section("Možnosti") {
-            Picker("Mapování", selection: $model.mappingKind) {
-                Text("Univerzální").tag(FinFillViewModel.MappingKind.universal)
-                Text("NVDA (segmenty)").tag(FinFillViewModel.MappingKind.nvda)
-            }
             Toggle("Přepsat neprázdné buňky", isOn: $model.overwrite)
             Toggle("List Segments (segmenty, trhy, regiony + meziroční změna)", isOn: $model.segments)
             Toggle("Souhrn modelem", isOn: $model.summarize)
@@ -388,10 +384,6 @@ final class FinFillViewModel {
     var summarize = true
     var language = "Czech"
 
-    enum MappingKind: String { case universal, nvda }
-    var mappingKind = MappingKind(rawValue: UserDefaults.standard.string(forKey: "finfill.mapping") ?? "") ?? .universal {
-        didSet { UserDefaults.standard.set(mappingKind.rawValue, forKey: "finfill.mapping"); invalidate() }
-    }
     var newWorkbook: FinFillPipeline.NewWorkbookReport?
     var segments = UserDefaults.standard.object(forKey: "finfill.segments") as? Bool ?? true {
         didSet { UserDefaults.standard.set(segments, forKey: "finfill.segments") }
@@ -439,7 +431,7 @@ final class FinFillViewModel {
         var c = FinFillPipeline.Config(ticker: ticker.trimmingCharacters(in: .whitespaces).uppercased(),
                                        secUserAgent: userAgent.isEmpty ? "AIChat FinFill contact@example.com" : userAgent,
                                        spreadsheet: spreadsheet,
-                                       mapping: try mapping ?? (mappingKind == .nvda ? TemplateMapping.bundledNVDA() : TemplateMapping.bundledUniversal()))
+                                       mapping: try mapping ?? TemplateMapping.bundledUniversal())
         c.fiscalYear = Int(fiscalYearText.trimmingCharacters(in: .whitespaces))
         c.overwrite = overwrite
         c.dryRun = dryRun
@@ -485,7 +477,6 @@ final class FinFillViewModel {
                 Task { @MainActor in self.handle(e) }
             }
             self.selectSpreadsheet(id: w.spreadsheetID, name: w.title)
-            self.mappingKind = .universal
             self.newWorkbook = w
             self.summaryMarkdown = w.summary?.markdown(company: w.filing.company)
         }

@@ -177,7 +177,11 @@ public enum TemplateRequests {
         if let ha = s.ha { f["horizontalAlignment"] = ha }
         var borders: [String: Any] = [:]
         for (key, value) in [("top", s.bt), ("bottom", s.bb), ("left", s.bl), ("right", s.br)] {
-            if let value { borders[key] = ["style": value, "colorStyle": ["rgbColor": ["red": 0, "green": 0, "blue": 0]]] }
+            guard let value else { continue }
+            // "SOLID" or "SOLID#44546A" (border in the header fill color)
+            let parts = value.split(separator: "#", maxSplits: 1).map(String.init)
+            let color = parts.count == 2 ? rgb(parts[1]) : nil
+            borders[key] = ["style": parts[0], "colorStyle": ["rgbColor": color ?? ["red": 0, "green": 0, "blue": 0]]]
         }
         if !borders.isEmpty { f["borders"] = borders }
         return f

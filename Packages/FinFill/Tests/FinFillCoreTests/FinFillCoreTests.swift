@@ -289,6 +289,25 @@ final class TemplateTests: XCTestCase {
                                                    values: ["TICKER": "AMD", "FY_FIRST": "2017", "TODAY": "DATE(2026,9,21)", "FYEND": "DATE(2025,12,27)"])
         let updates = req.compactMap { $0["updateCells"] as? [String: Any] }
         XCTAssertEqual(updates.count, 5)
+
+        // Every written row / column must fit into the grid created by createBody
+        // (Sheets: "Attempting to write row: 68, beyond the last requested row of: 67").
+        let grids = Dictionary(uniqueKeysWithValues: ((body["sheets"] as! [[String: Any]]).map { s -> (String, (Int, Int)) in
+            let p = s["properties"] as! [String: Any], g = p["gridProperties"] as! [String: Any]
+            return (p["title"] as! String, (g["rowCount"] as! Int, g["columnCount"] as! Int))
+        }))
+        for sheet in t.sheets {
+            let u = updates.first { (($0["start"] as! [String: Any])["sheetId"] as! Int) == ids[sheet.title]! }!
+            let rows = u["rows"] as! [[String: Any]]
+            let cols = rows.map { ($0["values"] as! [[String: Any]]).count }.max() ?? 0
+            XCTAssertLessThanOrEqual(rows.count, grids[sheet.title]!.0, sheet.title)
+            XCTAssertLessThanOrEqual(cols, grids[sheet.title]!.1, sheet.title)
+        }
+        for m in req.compactMap({ $0["mergeCells"] as? [String: Any] }) {
+            let r = m["range"] as! [String: Any]
+            let title = ids.first { $0.value == r["sheetId"] as! Int }!.key
+            XCTAssertLessThanOrEqual(r["endRowIndex"] as! Int, grids[title]!.0)
+        }
         XCTAssertGreaterThan(req.filter { $0["mergeCells"] != nil }.count, 10)
 
         func cell(_ sheet: String, _ a: String) -> [String: Any] {

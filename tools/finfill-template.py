@@ -199,8 +199,7 @@ def export(wb):
                         styles.append(st)
                     item["s"] = style_index[k]
                 cells.append(item)
-                if v is not None:
-                    max_r, max_c = max(max_r, cell.row), max(max_c, cell.column)
+                max_r, max_c = max(max_r, cell.row), max(max_c, cell.column)
         sheets.append({
             "title": ws.title,
             "hideGridlines": ws.sheet_view.showGridLines is False,

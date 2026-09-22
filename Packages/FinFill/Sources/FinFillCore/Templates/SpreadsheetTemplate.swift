@@ -36,6 +36,18 @@ public struct SpreadsheetTemplate: Codable, Sendable {
         public var columnWidths: [String: Int]
         public var merges: [String]
         public var cells: [Cell]
+
+        /// Grid big enough for every cell (styled-only cells too), merge and column width.
+        /// Sheets rejects the whole batchUpdate if a single cell lies outside the grid.
+        public var gridSize: (rows: Int, columns: Int) {
+            var r = 0, c = 0
+            for cell in cells { if let (row, col) = A1.parse(cell.a) { r = max(r, row + 1); c = max(c, col + 1) } }
+            for m in merges {
+                for part in m.split(separator: ":") { if let (row, col) = A1.parse(String(part)) { r = max(r, row + 1); c = max(c, col + 1) } }
+            }
+            for key in columnWidths.keys { c = max(c, A1.index(key) + 1) }
+            return (max(rowCount, r + 10), max(columnCount, c))
+        }
     }
 
     public var name: String
@@ -69,7 +81,7 @@ public enum TemplateRequests {
                 ["properties": [
                     "title": s.title,
                     "index": i,
-                    "gridProperties": ["rowCount": s.rowCount, "columnCount": s.columnCount, "hideGridlines": s.hideGridlines],
+                    "gridProperties": ["rowCount": s.gridSize.rows, "columnCount": s.gridSize.columns, "hideGridlines": s.hideGridlines],
                 ] as [String: Any]]
             },
         ]

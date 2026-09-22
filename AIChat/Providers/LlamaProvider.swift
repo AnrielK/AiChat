@@ -802,6 +802,7 @@ actor LlamaEngine {
             """)
         streamedLayout = stream ? layout : nil
         prefetcher = stream ? layout.flatMap { ExpertPrefetcher(path: path, layout: $0) } : nil
+        if let expertUsed { prefetcher?.activeExperts = expertUsed }
         repackedBytes = repack?.matrices.reduce(0) { $0 + $1.bytes } ?? 0
         LocalRuntime.reportStreaming(
             streamedLayout,

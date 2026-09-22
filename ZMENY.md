@@ -1,3 +1,34 @@
+# MoE: vyhodnocení předpovědi expertů a pokrytí prefillu
+
+Navazuje na záznam expertů. Cílem je zjistit, jestli se vyplatí předčítat experty dopředu,
+aby čtení z flash běželo souběžně s výpočtem. Zatím se jen měří, podle odhadu se nic nečte.
+
+- **Odhad z routeru další vrstvy** (`RouterPredictor`). Při zapnutém záznamu si callback při generování
+  (dávka 1) řekne i o uzel `ffn_inp-L`, tedy reziduální vstup MoE vrstvy L. Vynásobí ho routerem vrstvy
+  L+1 (`blk.N.ffn_gate_inp`) a seřazený odhad 2k expertů uloží. Do routeru je při načtení složená RMSNorm
+  vrstvy L+1 (`blk.N.ffn_norm`): kladné měřítko 1/rms pořadí nezmění, takže odhad vidí stejný vstup jako
+  router L+1, jen bez příspěvku attention vrstvy L+1. Váhy se drží v F16 (u Qwen3-30B-A3B ~25 MB)
+  a násobí přes Accelerate.
+  Odhad vzniká před MoE vrstvy L, takže náskok je MoE vrstvy L plus attention vrstvy L+1. Routery se
+  načtou jen se záznamem a s jeho vypnutím se uvolní. Model bez routerů v F32/F16/BF16 odhad nemá.
+- **Formát záznamu v2**: u události je navíc seřazený odhad. Verze 1 se dál čte.
+  `GGUFLayout` si pamatuje polohu routerů a norem před MoE (`routerTensors`).
+- **Simulace › Předpověď expertů**: kolik potřebných bajtů by odhad trefil a kolik přečetl zbytečně.
+  Řádky: minulý token (experti stejné vrstvy z předchozího tokenu), router L+1 s k, k+2, k+4 a 2k experty
+  a sjednocení routeru s minulým tokenem.
+- **Simulace › Prefill**: průměrné pokrytí vrstvy, podíl vrstev s pokrytím ≥ 30 % a ≥ 50 % a vybraní
+  experti proti celým vrstvám. Nad ~30 % by bylo levnější číst celou vrstvu sekvenčně (≈3,7 GB/s)
+  než vybrané experty po stránkách (≈1,1 GB/s).
+- `tools/expert_cache_sim.py` umí totéž a čte obě verze záznamu.
+
+Cena: se záznamem se graf při generování zastavuje v každé vrstvě dvakrát (u `ffn_inp` a u
+`ffn_moe_topk`), takže rychlost naměřená se zapnutým záznamem není srovnatelná s během bez něj.
+
+Ověřeno v Pythonu na syntetických záznamech v1 i v2 (hodnoty rostou s délkou odhadu podle očekávání).
+Swift část je nepřeložená.
+
+---
+
 # MoE: záznam výběru expertů, skutečný zásah cache a simulace
 
 Převzato z [kimi-k3-in-c](https://github.com/FareedKhan-dev/kimi-k3-in-c), sekce 12–13 a „The cache

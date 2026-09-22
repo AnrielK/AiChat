@@ -36,11 +36,17 @@ final class ExpertPrefetcher: @unchecked Sendable {
     /// krátké, protože jde o jednotky expertů, takže se dvojí mapování nemá z čeho zaplatit.
     private static let ownMapMinBatch = 32
     private static let topkPrefix = Array("ffn_moe_topk-".utf8CString.dropLast())
+    /// Reziduální vstup MoE vrstvy (`ffn_inp-N`) – z něj se odhadují experti vrstvy N+1.
+    private static let hiddenPrefix = Array("ffn_inp-".utf8CString.dropLast())
 
     private let fd: Int32
     private let path: String
     private let layers: [Int: [GGUFLayout.ExpertTensor]]
     private let expertCount: Int
+    private let routers: [Int: GGUFLayout.RouterTensor]
+    /// Kolik expertů router opravdu vybírá (po případném snížení v Parametrech).
+    /// Odhad se ukládá dvojnásobně dlouhý, ať jde změřit i „odhad o pár expertů víc“.
+    var activeExperts = 0
 
     /// Předčítat vybrané experty. Vypnuté jen tehdy, když callback běží kvůli záznamu trace
     /// a předčítání je v nastavení vypnuté – pak se jen měří a zapisuje, nic se nečte.
@@ -50,6 +56,13 @@ final class ExpertPrefetcher: @unchecked Sendable {
     /// Buffer pro `mincore` – callback běží v jednom vlákně, stačí jeden.
     private var residencyVector: [CChar] = []
     private var residencyFailed = false
+    /// Odhad expertů další vrstvy z jejího routeru – jen při záznamu (zatím se jen měří).
+    private var predictor: RouterPredictor?
+    private var predictorFailed = false
+    /// Odhady čekající na skutečný výběr, podle vrstvy, pro kterou platí. Slovník, ne jedna
+    /// hodnota: odhad pro N+1 vzniká u `ffn_inp-N`, tedy ještě před `ffn_moe_topk-N`.
+    private var pendingPredictions: [Int: [Int]] = [:]
+    private var hiddenBuffer: [Float] = []
 
     // Statistiky jedné odpovědi (callback běží synchronně ve vlákně llama_decode).
     private let stats = OSAllocatedUnfairLock(initialState: Stats())
@@ -108,6 +121,8 @@ final class ExpertPrefetcher: @unchecked Sendable {
         self.path = path
         self.layers = layout.expertTensors
         self.expertCount = layout.expertCount
+        self.routers = layout.routerTensors
+        self.activeExperts = layout.expertUsed
         var offsets: [String: Int] = [:]
         for tensor in layout.expertTensors.values.joined() { offsets[tensor.name] = tensor.fileOffset }
         self.tensorOffsets = offsets
@@ -148,9 +163,16 @@ final class ExpertPrefetcher: @unchecked Sendable {
         if !enabled {
             traceWriter?.flush()
             traceWriter = nil
+            predictor = nil
+            pendingPredictions = [:]
             return
         }
         guard traceWriter == nil else { return }
+        // Routery (u Qwen3-30B-A3B ~25 MB) se načtou jen se záznamem a s ním se i uvolní.
+        if predictor == nil, !predictorFailed, !routers.isEmpty {
+            predictor = RouterPredictor(fd: fd, routers: routers)
+            predictorFailed = predictor == nil
+        }
         let layerCount = (layers.keys.max() ?? -1) + 1
         var slices = [Int](repeating: 0, count: layerCount)
         for (layer, tensors) in layers {
@@ -160,7 +182,8 @@ final class ExpertPrefetcher: @unchecked Sendable {
             modelName: (path as NSString).lastPathComponent,
             expertCount: expertCount,
             sliceBytes: slices,
-            residencyMeasured: ownMap != nil && !residencyFailed
+            residencyMeasured: ownMap != nil && !residencyFailed,
+            predictions: predictor != nil
         )
     }
 
@@ -194,10 +217,42 @@ final class ExpertPrefetcher: @unchecked Sendable {
     }
 
     fileprivate func wants(_ tensor: UnsafeMutablePointer<ggml_tensor>) -> Bool {
+        Self.hasPrefix(tensor, Self.topkPrefix) || wantsHidden(tensor)
+    }
+
+    /// Skrytý stav pro odhad jen při generování (dávka 1) a se zapnutým záznamem. Každý uzel,
+    /// o který si callback řekne, dělí graf – u prefillu by odhad stál víc, než kolik by řekl.
+    fileprivate func wantsHidden(_ tensor: UnsafeMutablePointer<ggml_tensor>) -> Bool {
+        predictor != nil && traceWriter != nil && tensor.pointee.ne.1 == 1
+            && tensor.pointee.type == GGML_TYPE_F32 && Self.hasPrefix(tensor, Self.hiddenPrefix)
+    }
+
+    private static func hasPrefix(_ tensor: UnsafeMutablePointer<ggml_tensor>, _ prefix: [CChar]) -> Bool {
         withUnsafeBytes(of: tensor.pointee.name) { raw in
-            raw.count > Self.topkPrefix.count
-                && zip(raw, Self.topkPrefix).allSatisfy { UInt8(bitPattern: $1) == $0 }
+            raw.count > prefix.count && zip(raw, prefix).allSatisfy { UInt8(bitPattern: $1) == $0 }
         }
+    }
+
+    /// Ze vstupu MoE vrstvy N odhadne experty vrstvy N+1 (seřazené podle skóre).
+    fileprivate func predictNext(_ tensor: UnsafeMutablePointer<ggml_tensor>) {
+        guard let predictor, let layer = Self.layerNumber(tensor, prefix: Self.hiddenPrefix),
+              predictor.canPredict(layer: layer + 1),
+              Int(tensor.pointee.ne.0) == predictor.embedding, tensor.pointee.buffer != nil else { return }
+        let bytes = predictor.embedding * MemoryLayout<Float>.size
+        let ranked: [Int]
+        let count = min(predictor.experts, 2 * max(1, activeExperts))
+        if ggml_backend_buffer_is_host(tensor.pointee.buffer), let data = tensor.pointee.data {
+            ranked = predictor.predict(layer: layer + 1, hidden: data.assumingMemoryBound(to: Float.self), count: count)
+        } else {
+            if hiddenBuffer.count < predictor.embedding {
+                hiddenBuffer = [Float](repeating: 0, count: predictor.embedding)
+            }
+            ranked = hiddenBuffer.withUnsafeMutableBufferPointer { buffer in
+                ggml_backend_tensor_get(tensor, buffer.baseAddress!, 0, bytes)
+                return predictor.predict(layer: layer + 1, hidden: buffer.baseAddress!, count: count)
+            }
+        }
+        pendingPredictions[layer + 1] = ranked
     }
 
     fileprivate func handle(_ tensor: UnsafeMutablePointer<ggml_tensor>) {
@@ -212,10 +267,14 @@ final class ExpertPrefetcher: @unchecked Sendable {
         let batchTokens = Int(tensor.pointee.ne.1)
 
         // Záznam a zásah cache – musí se změřit před předčtením, jinak by vyšel vždy 100 %.
+        // Odhad pro tuhle vrstvu (udělaný o vrstvu dřív) platí jen jednou – pak se zahodí.
+        let prediction = pendingPredictions.removeValue(forKey: layer)
         if let traceWriter {
             let measureStart = Date.now
             let measured = residency(of: selected, in: tensors)
-            traceWriter.append(layer: layer, tokens: batchTokens, experts: selected, resident: measured?.experts)
+            let predicted = batchTokens == 1 ? prediction ?? [] : []
+            traceWriter.append(layer: layer, tokens: batchTokens, experts: selected,
+                               resident: measured?.experts, predicted: predicted)
             if let measured {
                 let elapsed = Date.now.timeIntervalSince(measureStart)
                 stats.withLock {
@@ -408,10 +467,15 @@ final class ExpertPrefetcher: @unchecked Sendable {
 
     /// „ffn_moe_topk-12“ → 12
     private func layerIndex(_ tensor: UnsafeMutablePointer<ggml_tensor>) -> Int? {
+        Self.layerNumber(tensor, prefix: Self.topkPrefix)
+    }
+
+    /// Číslo vrstvy za prefixem názvu uzlu („ffn_inp-7“ → 7).
+    private static func layerNumber(_ tensor: UnsafeMutablePointer<ggml_tensor>, prefix: [CChar]) -> Int? {
         withUnsafeBytes(of: tensor.pointee.name) { raw in
             var value = 0
             var digits = 0
-            for byte in raw.dropFirst(Self.topkPrefix.count) {
+            for byte in raw.dropFirst(prefix.count) {
                 guard byte >= 48, byte <= 57 else { break }
                 value = value * 10 + Int(byte - 48)
                 digits += 1
@@ -465,7 +529,11 @@ private let expertPrefetchCallback: ggml_backend_sched_eval_callback = { tensor,
         prefetcher.learnMapping(tensor)
         return prefetcher.wants(tensor)
     }
-    if prefetcher.wants(tensor) { prefetcher.handle(tensor) }
+    if prefetcher.wantsHidden(tensor) {
+        prefetcher.predictNext(tensor)
+    } else if prefetcher.wants(tensor) {
+        prefetcher.handle(tensor)
+    }
     return true
 }
 #endif

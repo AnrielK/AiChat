@@ -12,10 +12,11 @@ import os
 /// Soubor `.axtr` (little-endian):
 ///
 ///     "AXTR"            4 B   magic
-///     version           u16   1
+///     version           u16   2 (1 = bez odhadu, čte se dál)
 ///     expertCount       u16   expertů na vrstvu
 ///     layerCount        u16   nejvyšší index vrstvy + 1
 ///     flags             u16   bit 0 = u událostí je změřená rezidence (mincore)
+///                             bit 1 = u událostí generování je odhad z routeru předchozí vrstvy
 ///     sliceBytes        u32 × layerCount   bajty jednoho experta ve vrstvě (0 = vrstva bez expertů)
 ///     nameLength        u16
 ///     name              UTF-8 (název souboru modelu)
@@ -24,13 +25,16 @@ import os
 ///       tokens          u16   tokenů v dávce (1 = generování, víc = prefill), max 65535
 ///       count           u16   počet vybraných expertů (unikátní přes celou dávku)
 ///       resident        u16   kolik z nich leželo celých v page cache, 0xFFFF = neměřeno
+///       predictedCount  u16   jen verze 2: délka odhadu (0 = bez odhadu)
 ///       experts         u16 × count, vzestupně
+///       predicted       u16 × predictedCount, jen verze 2: odhad `RouterPredictor` udělaný
+///                             o vrstvu dřív, seřazený od nejvyššího skóre routeru
 ///
 /// U prefillu se ukládá sjednocení výběru přes celou dávku – pořadí po tokenech se v callbacku
 /// nedá levně zachovat a pro cache na něm nezáleží (dávka se počítá naráz).
 struct ExpertTrace: Sendable {
     static let magic: [UInt8] = Array("AXTR".utf8)
-    static let version: UInt16 = 1
+    static let version: UInt16 = 2
     static let unmeasured: UInt16 = 0xFFFF
     static let fileExtension = "axtr"
 
@@ -40,6 +44,8 @@ struct ExpertTrace: Sendable {
         /// nil = rezidence se neměřila.
         let resident: Int?
         let experts: [UInt16]
+        /// Odhad z routeru o vrstvu dřív, seřazený podle skóre. Prázdné = bez odhadu.
+        let predicted: [UInt16]
 
         var isDecode: Bool { tokens == 1 }
     }
@@ -49,6 +55,7 @@ struct ExpertTrace: Sendable {
     let sliceBytes: [Int]
     let modelName: String
     let residencyMeasured: Bool
+    let hasPredictions: Bool
     let events: [Event]
 
     /// Složka se záznamy – v Documents, takže je vidět v aplikaci Soubory a jde poslat na Mac.
@@ -80,7 +87,7 @@ struct ExpertTrace: Sendable {
         var reader = ByteReader(data: data)
         guard let magic = reader.bytes(4), magic == Self.magic else { throw ParseError.notATrace }
         guard let version = reader.u16() else { throw ParseError.truncated }
-        guard version == Self.version else { throw ParseError.unsupportedVersion(Int(version)) }
+        guard version == 1 || version == 2 else { throw ParseError.unsupportedVersion(Int(version)) }
         guard let expertCount = reader.u16(), let layerCount = reader.u16(), let flags = reader.u16() else {
             throw ParseError.truncated
         }
@@ -99,21 +106,24 @@ struct ExpertTrace: Sendable {
             // Useknutý konec (appka spadla uprostřed zápisu) – vezme se, co je celé.
             guard let layer = reader.u16(), let tokens = reader.u16(),
                   let count = reader.u16(), let resident = reader.u16() else { break }
-            var experts: [UInt16] = []
-            experts.reserveCapacity(Int(count))
-            var complete = true
-            for _ in 0..<count {
-                guard let expert = reader.u16() else { complete = false; break }
-                experts.append(expert)
+            let predictedCount: UInt16
+            if version >= 2 {
+                guard let value = reader.u16() else { break }
+                predictedCount = value
+            } else {
+                predictedCount = 0
             }
-            guard complete else { break }
+            guard let experts = reader.u16Array(Int(count)),
+                  let predicted = reader.u16Array(Int(predictedCount)) else { break }
             // Poškozená událost (vrstva nebo expert mimo rozsah) by simulátor shodila – přeskočit.
-            guard Int(layer) < slices.count, experts.allSatisfy({ Int($0) < Int(expertCount) }) else { continue }
+            guard Int(layer) < slices.count,
+                  (experts + predicted).allSatisfy({ Int($0) < Int(expertCount) }) else { continue }
             events.append(Event(
                 layer: Int(layer),
                 tokens: Int(tokens),
                 resident: resident == Self.unmeasured ? nil : Int(resident),
-                experts: experts
+                experts: experts,
+                predicted: predicted
             ))
         }
 
@@ -121,6 +131,7 @@ struct ExpertTrace: Sendable {
         self.sliceBytes = slices
         self.modelName = String(decoding: nameBytes, as: UTF8.self)
         self.residencyMeasured = flags & 1 != 0
+        self.hasPredictions = flags & 2 != 0
         self.events = events
     }
 }
@@ -144,7 +155,7 @@ final class ExpertTraceWriter: @unchecked Sendable {
         var events = 0
     }
 
-    init(modelName: String, expertCount: Int, sliceBytes: [Int], residencyMeasured: Bool) {
+    init(modelName: String, expertCount: Int, sliceBytes: [Int], residencyMeasured: Bool, predictions: Bool) {
         let stamp = Self.stampFormatter.string(from: .now)
         let stem = (modelName as NSString).deletingPathExtension
         url = ExpertTrace.directory.appending(path: "\(stem)-\(stamp).\(ExpertTrace.fileExtension)")
@@ -153,7 +164,7 @@ final class ExpertTraceWriter: @unchecked Sendable {
         data.appendLE(ExpertTrace.version)
         data.appendLE(UInt16(clamping: expertCount))
         data.appendLE(UInt16(clamping: sliceBytes.count))
-        data.appendLE(UInt16(residencyMeasured ? 1 : 0))
+        data.appendLE(UInt16((residencyMeasured ? 1 : 0) | (predictions ? 2 : 0)))
         for bytes in sliceBytes { data.appendLE(UInt32(clamping: bytes)) }
         let name = Data(modelName.utf8.prefix(1_024))
         data.appendLE(UInt16(name.count))
@@ -170,14 +181,16 @@ final class ExpertTraceWriter: @unchecked Sendable {
     }
 
     /// Volá se z callbacku výpočtu – jen přidá do bufferu.
-    func append(layer: Int, tokens: Int, experts: [Int], resident: Int?) {
+    func append(layer: Int, tokens: Int, experts: [Int], resident: Int?, predicted: [Int]) {
         let shouldFlush = state.withLock { (state: inout State) -> Bool in
             guard !state.failed else { return false }
             state.pending.appendLE(UInt16(clamping: layer))
             state.pending.appendLE(UInt16(clamping: tokens))
             state.pending.appendLE(UInt16(clamping: experts.count))
             state.pending.appendLE(resident.map { UInt16(clamping: min($0, 0xFFFE)) } ?? ExpertTrace.unmeasured)
+            state.pending.appendLE(UInt16(clamping: predicted.count))
             for expert in experts { state.pending.appendLE(UInt16(clamping: expert)) }
+            for expert in predicted { state.pending.appendLE(UInt16(clamping: expert)) }
             state.events += 1
             return state.pending.count >= Self.flushThreshold
         }
@@ -239,6 +252,14 @@ private struct ByteReader {
         guard offset + 2 <= data.endIndex else { return nil }
         defer { offset += 2 }
         return UInt16(data[offset]) | UInt16(data[offset + 1]) << 8
+    }
+
+    mutating func u16Array(_ count: Int) -> [UInt16]? {
+        guard count >= 0, offset + 2 * count <= data.endIndex else { return nil }
+        var result: [UInt16] = []
+        result.reserveCapacity(count)
+        for _ in 0..<count { result.append(u16()!) }
+        return result
     }
 
     mutating func u32() -> UInt32? {

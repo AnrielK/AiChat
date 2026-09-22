@@ -72,6 +72,34 @@ enum ExpertCacheSimulator {
         /// generování nemá, čísla jsou ze všeho.
         let decodeOnly: Bool
         let rows: [Row]
+        /// Úspěšnost předpovědí při generování (prázdné = záznam bez generování).
+        let predictions: [PredictionRow]
+        /// Záznam má odhad z routeru (verze 2, `RouterPredictor`).
+        let hasRouterPredictions: Bool
+        /// Pokrytí vrstev při prefillu (nil = záznam bez prefillu).
+        let prefill: PrefillCoverage?
+    }
+
+    /// Jak dobře by odhad načetl experty dopředu – v bajtech vůči tomu, co bylo opravdu potřeba.
+    struct PredictionRow: Sendable, Identifiable {
+        let label: String
+        /// Podíl potřebných bajtů, které by odhad načetl.
+        let recall: Double
+        /// Zbytečně přečtené bajty vůči potřebným (1 = dvojnásobné čtení).
+        let waste: Double
+
+        var id: String { label }
+    }
+
+    struct PrefillCoverage: Sendable {
+        let events: Int
+        /// Průměrný podíl expertů vrstvy, které dávka promptu vybrala.
+        let meanCoverage: Double
+        /// Podíl vrstev, kde dávka vybrala aspoň 30 % / 50 % expertů.
+        let over30: Double
+        let over50: Double
+        let selectedBytes: Int
+        let layerBytes: Int
     }
 
     static let defaultCapacities: [Int] = [0.25, 0.5, 1, 1.5, 2, 3, 4, 6].map { Int($0 * 1_073_741_824) }
@@ -143,7 +171,95 @@ enum ExpertCacheSimulator {
             topTenthShare: topTenthShare,
             ceilingHitRate: pick(compulsory(stream)).hitRate,
             decodeOnly: decodeOnly,
-            rows: rows
+            rows: rows,
+            predictions: predictionRows(trace),
+            hasRouterPredictions: trace.hasPredictions,
+            prefill: prefillCoverage(trace)
+        )
+    }
+
+    // MARK: - Předpověď a prefill
+
+    private struct Guess {
+        var needed = 0
+        var hit = 0
+        var extra = 0
+
+        mutating func add(actual: Set<UInt16>, guess: Set<UInt16>, size: Int) {
+            needed += actual.count * size
+            hit += actual.intersection(guess).count * size
+            extra += guess.subtracting(actual).count * size
+        }
+    }
+
+    /// Stejné řádky a pořadí jako `prediction_stats` v Python nástroji.
+    private static func predictionRows(_ trace: ExpertTrace) -> [PredictionRow] {
+        let previousLabel = "minulý token"
+        let combinedLabel = "router L+1 + minulý token"
+        let depths: [(label: String, extra: (Int) -> Int)] = [
+            ("router L+1", { $0 }),
+            ("router L+1, k+2", { $0 + 2 }),
+            ("router L+1, k+4", { $0 + 4 }),
+            ("router L+1, 2k", { 2 * $0 }),
+        ]
+        var guesses: [String: Guess] = [:]
+        var previous: [Int: Set<UInt16>] = [:]
+        for event in trace.events where event.isDecode {
+            let actual = Set(event.experts)
+            let size = trace.sliceBytes[event.layer]
+            let k = actual.count
+            let before = previous[event.layer]
+            if let before { guesses[previousLabel, default: Guess()].add(actual: actual, guess: before, size: size) }
+            if !event.predicted.isEmpty {
+                for depth in depths {
+                    let count = depth.extra(k)
+                    guard count <= event.predicted.count else { continue }
+                    guesses[depth.label, default: Guess()].add(
+                        actual: actual, guess: Set(event.predicted.prefix(count)), size: size)
+                }
+                if let before {
+                    guesses[combinedLabel, default: Guess()].add(
+                        actual: actual, guess: Set(event.predicted.prefix(k)).union(before), size: size)
+                }
+            }
+            previous[event.layer] = actual
+        }
+        let order = [previousLabel] + depths.map { $0.label } + [combinedLabel]
+        return order.compactMap { label in
+            guard let guess = guesses[label], guess.needed > 0 else { return nil }
+            return PredictionRow(
+                label: label,
+                recall: Double(guess.hit) / Double(guess.needed),
+                waste: Double(guess.extra) / Double(guess.needed)
+            )
+        }
+    }
+
+    private static func prefillCoverage(_ trace: ExpertTrace) -> PrefillCoverage? {
+        var events = 0
+        var coverageSum = 0.0
+        var over30 = 0
+        var over50 = 0
+        var selectedBytes = 0
+        var layerBytes = 0
+        for event in trace.events where event.tokens > 1 && trace.expertCount > 0 {
+            let coverage = Double(event.experts.count) / Double(trace.expertCount)
+            let size = trace.sliceBytes[event.layer]
+            events += 1
+            coverageSum += coverage
+            if coverage >= 0.3 { over30 += 1 }
+            if coverage >= 0.5 { over50 += 1 }
+            selectedBytes += event.experts.count * size
+            layerBytes += trace.expertCount * size
+        }
+        guard events > 0 else { return nil }
+        return PrefillCoverage(
+            events: events,
+            meanCoverage: coverageSum / Double(events),
+            over30: Double(over30) / Double(events),
+            over50: Double(over50) / Double(events),
+            selectedBytes: selectedBytes,
+            layerBytes: layerBytes
         )
     }
 

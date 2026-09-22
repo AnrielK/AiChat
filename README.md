@@ -88,6 +88,8 @@ Skript nepotřebuje žádné balíčky, mění jen pořadí dat a offsety v hlav
 python tools/expert_cache_sim.py Qwen3-30B-A3B-Instruct-2507-Q4_K_M-20260922-204512.axtr --sizes 0.5 1 1.5 2 3
 ```
 
+**Předpověď expertů.** Se zapnutým záznamem appka při generování u uzlu `ffn_inp-L` (vstup MoE vrstvy L) vynásobí skrytý stav routerem vrstvy L+1 (`RouterPredictor`). Routery se načtou ze souboru s už složenou RMSNorm vrstvy L+1 a uloží v F16, u Qwen3 ~25 MB a seřazený odhad uloží do záznamu (formát v2). Simulace pak ukáže, kolik potřebných bajtů by předčítání o vrstvu dopředu trefilo a kolik přečetlo zbytečně: pro odhad z routeru (k, k+2, k+4, 2k expertů), pro „experty z minulého tokenu“ a pro jejich sjednocení. Podle odhadu se zatím nic nečte, výsledek má teprve ukázat, jestli se to vyplatí. Sekce **Prefill** ukazuje, jakou část expertů vrstvy vybere dávka promptu. Nad ~30 % by bylo rychlejší přečíst celou vrstvu sekvenčně (≈3,7 GB/s) než vybrané experty po stránkách (≈1,1 GB/s).
+
 Jak číst výsledek: když je LRU daleko pod Belady, páka je v tom, *co* v RAM držet, ne kolik RAM přidat. LRU menší než pracovní sada jednoho tokenu (u Qwen3-30B-A3B ~1 GB) má zásah 0 %: vrstvy se procházejí stále dokola ve stejném pořadí, takže LRU každého experta vyhodí těsně předtím, než ho další token potřebuje.
 
 **CPU, ne GPU.** Měření na iPhonu s 8 GB (Qwen3-30B-A3B Q4_K_M, druhá odpověď): jen CPU se 4 vlákny 3,3 tok/s, CPU + GPU 1,6–1,9 tok/s. Střídání CPU a GPU ve 48 vrstvách na token stojí víc, než GPU ušetří. Streamované MoE proto běží jen na CPU bez ohledu na GPU vrstvy; GPU jde zapnout pro pokusy (**GPU pro hustou část MoE**), a to jen u přeuspořádaného souboru.

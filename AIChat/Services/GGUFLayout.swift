@@ -34,6 +34,30 @@ struct GGUFLayout: Sendable, Equatable {
     /// kandidáti na přebalení vah pro rychlejší ARM jádra (viz `LlamaEngine.repackOverrides`).
     let denseMatrices: [DenseMatrix]
 
+    /// Routery MoE (`blk.N.ffn_gate_inp.weight`) podle vrstvy. Slouží k odhadu expertů další
+    /// vrstvy dřív, než se k ní výpočet dostane (`ExpertPrefetcher`, záznam trace).
+    let routerTensors: [Int: RouterTensor]
+
+    struct RouterTensor: Sendable, Equatable {
+        /// Absolutní offset v souboru.
+        let fileOffset: Int
+        let bytes: Int
+        /// `ggml_type` jako číslo (rawValue). llama-quantize routery nekvantuje – bývají F32.
+        let type: UInt32
+        /// `ne[0]` – šířka skrytého stavu, `ne[1]` – počet expertů.
+        let embedding: Int
+        let experts: Int
+        /// RMSNorm před MoE téže vrstvy (`blk.N.ffn_norm.weight`) – router vidí vstup vynásobený
+        /// touhle vahou. nil = v souboru není (odhad pak nejde).
+        let norm: NormTensor?
+    }
+
+    struct NormTensor: Sendable, Equatable {
+        let fileOffset: Int
+        let bytes: Int
+        let type: UInt32
+    }
+
     struct DenseMatrix: Sendable, Equatable {
         let name: String
         /// `ggml_type` jako číslo (rawValue).
@@ -117,6 +141,8 @@ struct GGUFLayout: Sendable, Equatable {
         var gpuEnd = 0
         var expertTensors: [Int: [ExpertTensor]] = [:]
         var denseMatrices: [DenseMatrix] = []
+        var routerTensors: [Int: RouterTensor] = [:]
+        var normTensors: [Int: NormTensor] = [:]
         let dataOffset = Int(gguf_get_data_offset(context))
         for index in 0..<gguf_get_n_tensors(context) {
             let bytes = Int(gguf_get_tensor_size(context, index))
@@ -129,6 +155,24 @@ struct GGUFLayout: Sendable, Equatable {
                     expertTensors[layer, default: []].append(ExpertTensor(name: name, fileOffset: offset, bytes: bytes))
                 }
             } else if !name.hasPrefix("token_embd.") {
+                if name.hasSuffix(".ffn_norm.weight"), let layer = layerIndex(name) {
+                    normTensors[layer] = NormTensor(
+                        fileOffset: dataOffset + Int(gguf_get_tensor_offset(context, index)),
+                        bytes: bytes,
+                        type: gguf_get_tensor_type(context, index).rawValue
+                    )
+                }
+                if name.hasSuffix(".ffn_gate_inp.weight"), let layer = layerIndex(name), let tensorContext,
+                   let meta = ggml_get_tensor(tensorContext, name), meta.pointee.ne.2 == 1, meta.pointee.ne.3 == 1 {
+                    routerTensors[layer] = RouterTensor(
+                        fileOffset: dataOffset + Int(gguf_get_tensor_offset(context, index)),
+                        bytes: bytes,
+                        type: meta.pointee.type.rawValue,
+                        embedding: Int(meta.pointee.ne.0),
+                        experts: Int(meta.pointee.ne.1),
+                        norm: nil
+                    )
+                }
                 if isDenseMatrixName(name), let tensorContext, let meta = ggml_get_tensor(tensorContext, name),
                    meta.pointee.ne.2 == 1, meta.pointee.ne.3 == 1, meta.pointee.ne.1 > 1 {
                     denseMatrices.append(DenseMatrix(
@@ -145,6 +189,13 @@ struct GGUFLayout: Sendable, Equatable {
             }
         }
 
+        for (layer, router) in routerTensors {
+            routerTensors[layer] = RouterTensor(
+                fileOffset: router.fileOffset, bytes: router.bytes, type: router.type,
+                embedding: router.embedding, experts: router.experts, norm: normTensors[layer]
+            )
+        }
+
         let architecture = string(context, "general.architecture") ?? ""
         let layout = GGUFLayout(
             totalBytes: total,
@@ -155,7 +206,8 @@ struct GGUFLayout: Sendable, Equatable {
             gpuSpanBytes: gpuEnd > gpuStart ? gpuEnd - gpuStart : 0,
             gpuBytes: gpuBytes,
             expertTensors: expertTensors,
-            denseMatrices: denseMatrices
+            denseMatrices: denseMatrices,
+            routerTensors: routerTensors
         )
         cache.set(layout, for: key)
         return layout

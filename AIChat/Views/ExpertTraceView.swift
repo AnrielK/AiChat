@@ -78,6 +78,12 @@ struct ExpertTraceDetailView: View {
                 } else {
                     summarySection(report)
                     tableSection(report)
+                    if !report.predictions.isEmpty {
+                        predictionSection(report)
+                    }
+                    if let prefill = report.prefill {
+                        prefillSection(prefill)
+                    }
                 }
             } else {
                 HStack {
@@ -174,6 +180,59 @@ struct ExpertTraceDetailView: View {
 
                 Stejný výpočet s vlastními velikostmi: tools/expert_cache_sim.py (záznam pošli přes tlačítko sdílení).
                 """)
+        }
+    }
+
+    private func predictionSection(_ report: ExpertCacheSimulator.Report) -> some View {
+        Section {
+            Grid(alignment: .trailing, horizontalSpacing: 10, verticalSpacing: 8) {
+                GridRow {
+                    Text("Odhad").gridColumnAlignment(.leading)
+                    Text("trefí")
+                    Text("navíc")
+                }
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(.secondary)
+                ForEach(report.predictions) { row in
+                    GridRow {
+                        Text(row.label)
+                        Text(Self.percent(row.recall))
+                        Text(Self.percent(row.waste))
+                    }
+                    .font(.footnote)
+                    .monospacedDigit()
+                }
+            }
+            if !report.hasRouterPredictions {
+                Label("Odhad z routeru v záznamu není – záznam je ze starší verze appky, nebo model nemá routery v F32/F16/BF16.", systemImage: "info.circle")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+            }
+        } header: {
+            Text("Předpověď expertů")
+        } footer: {
+            Text("""
+                Kdyby šlo experty poznat dřív, než je router vybere, čtení z flash by běželo souběžně s výpočtem místo čekání. Trefí = podíl potřebných bajtů, které by odhad načetl dopředu. Navíc = zbytečně přečtené bajty vůči potřebným (100 % = dvojnásobné čtení).
+
+                Minulý token: experti stejné vrstvy z předchozího tokenu. Router L+1: router další vrstvy vynásobený skrytým stavem vrstvy L – odhad o vrstvu dřív; k+2, k+4 a 2k je odhad o pár expertů delší (víc trefí, víc čte zbytečně). Poslední řádek je sjednocení obou.
+
+                Vyplatí se, když trefí hodně a navíc je málo – zbytečné čtení bere propustnost flash, na které generování stojí. Dokud je čtení hlavní brzdou, odhad s „navíc“ nad ~30 % spíš uškodí.
+                """)
+        }
+    }
+
+    private func prefillSection(_ prefill: ExpertCacheSimulator.PrefillCoverage) -> some View {
+        Section {
+            LabeledContent("Průměrné pokrytí vrstvy", value: Self.percent(prefill.meanCoverage))
+            LabeledContent("Vrstev s pokrytím ≥ 30 %", value: Self.percent(prefill.over30))
+            LabeledContent("Vrstev s pokrytím ≥ 50 %", value: Self.percent(prefill.over50))
+            LabeledContent("Vybraní experti / celé vrstvy") {
+                Text("\(Self.bytes(prefill.selectedBytes)) / \(Self.bytes(prefill.layerBytes))")
+            }
+        } header: {
+            Text("Prefill")
+        } footer: {
+            Text("Kolik expertů vrstvy vybere dávka promptu. Prefill dostává z úložiště jednu stránku na operaci, takže čte zhruba 1,1 GB/s, zatímco sekvenční čtení zvládne ~3,7 GB/s. Když dávka vybere víc než zhruba 30 % expertů vrstvy, bylo by rychlejší přečíst celou vrstvu naráz, i když se tím přečte víc bajtů.")
         }
     }
 

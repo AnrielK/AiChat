@@ -14,6 +14,11 @@ Politiky:
   Belady  vyhodí toho, kdo bude potřeba nejpozději – strop, ne politika (zná budoucnost)
   strop   povinné výpadky: každého experta je potřeba aspoň jednou přečíst
 
+Navíc vyhodnotí, jak dobře jde experty předpovídat (čtení by pak běželo souběžně s výpočtem):
+  minulý token  experti stejné vrstvy z předchozího tokenu
+  router L+1    odhad z routeru další vrstvy nad skrytým stavem vrstvy L (záznam verze 2)
+a pokrytí vrstev při prefillu – od jakého podílu je levnější přečíst celou vrstvu naráz.
+
 Nepotřebuje žádné balíčky.
 """
 
@@ -39,6 +44,7 @@ class Event:
     tokens: int
     resident: int | None
     experts: list[int]
+    predicted: list[int] = field(default_factory=list)
 
 
 @dataclass
@@ -47,6 +53,7 @@ class Trace:
     slice_bytes: list[int]
     model_name: str
     residency_measured: bool
+    has_predictions: bool
     events: list[Event]
 
 
@@ -55,7 +62,7 @@ def read_trace(path: str) -> Trace:
     if data[:4] != MAGIC:
         sys.exit(f"{path}: není záznam expertů (.axtr)")
     version, expert_count, layer_count, flags = struct.unpack_from("<4H", data, 4)
-    if version != 1:
+    if version not in (1, 2):
         sys.exit(f"{path}: nepodporovaná verze {version}")
     offset = 12
     slices = list(struct.unpack_from(f"<{layer_count}I", data, offset))
@@ -66,16 +73,20 @@ def read_trace(path: str) -> Trace:
     offset += name_length
 
     events: list[Event] = []
-    while offset + 8 <= len(data):
+    head = 8 if version == 1 else 10
+    while offset + head <= len(data):
         layer, tokens, count, resident = struct.unpack_from("<4H", data, offset)
-        if offset + 8 + 2 * count > len(data):
+        predicted_count = struct.unpack_from("<H", data, offset + 8)[0] if version >= 2 else 0
+        end = offset + head + 2 * (count + predicted_count)
+        if end > len(data):
             break  # useknutý konec
-        experts = list(struct.unpack_from(f"<{count}H", data, offset + 8))
-        offset += 8 + 2 * count
-        if layer >= layer_count or any(e >= expert_count for e in experts):
+        experts = list(struct.unpack_from(f"<{count}H", data, offset + head))
+        predicted = list(struct.unpack_from(f"<{predicted_count}H", data, offset + head + 2 * count))
+        offset = end
+        if layer >= layer_count or any(e >= expert_count for e in experts + predicted):
             continue
-        events.append(Event(layer, tokens, None if resident == UNMEASURED else resident, experts))
-    return Trace(expert_count, slices, name, bool(flags & 1), events)
+        events.append(Event(layer, tokens, None if resident == UNMEASURED else resident, experts, predicted))
+    return Trace(expert_count, slices, name, bool(flags & 1), bool(flags & 2), events)
 
 
 @dataclass
@@ -195,6 +206,79 @@ def decode_tokens(trace: Trace) -> int:
     return sum(1 for e in trace.events if e.tokens == 1 and e.layer == first)
 
 
+@dataclass
+class Guess:
+    """Kolik bajtů odhad trefil, kolik přečetl zbytečně, z kolika potřebných."""
+    needed: int = 0
+    hit: int = 0
+    extra: int = 0
+
+    def add(self, actual: set[int], guess: set[int], size: int) -> None:
+        self.needed += len(actual) * size
+        self.hit += len(actual & guess) * size
+        self.extra += len(guess - actual) * size
+
+    @property
+    def recall(self) -> float:
+        return self.hit / self.needed if self.needed else 0.0
+
+    @property
+    def waste(self) -> float:
+        return self.extra / self.needed if self.needed else 0.0
+
+
+def prediction_stats(trace: Trace) -> dict[str, Guess]:
+    """Úspěšnost předpovědí při generování. Klíče v pořadí, v jakém se vypisují."""
+    result: dict[str, Guess] = {"minulý token": Guess()}
+    previous: dict[int, set[int]] = {}
+    for event in trace.events:
+        if event.tokens != 1:
+            continue
+        actual = set(event.experts)
+        size = trace.slice_bytes[event.layer]
+        k = len(actual)
+        before = previous.get(event.layer)
+        if before is not None:
+            result["minulý token"].add(actual, before, size)
+        if event.predicted:
+            for label, depth in (("router L+1", k), ("router L+1, k+2", k + 2),
+                                 ("router L+1, k+4", k + 4), ("router L+1, 2k", 2 * k)):
+                if depth <= len(event.predicted):
+                    result.setdefault(label, Guess()).add(actual, set(event.predicted[:depth]), size)
+            if before is not None:
+                result.setdefault("router L+1 + minulý token", Guess()).add(
+                    actual, set(event.predicted[:k]) | before, size)
+        previous[event.layer] = actual
+    return {label: guess for label, guess in result.items() if guess.needed}
+
+
+@dataclass
+class PrefillCoverage:
+    events: int = 0
+    coverage_sum: float = 0.0
+    over30: int = 0
+    over50: int = 0
+    selected_bytes: int = 0
+    layer_bytes: int = 0
+
+
+def prefill_coverage(trace: Trace) -> PrefillCoverage:
+    """Jak velkou část expertů vrstvy vybere dávka promptu."""
+    result = PrefillCoverage()
+    for event in trace.events:
+        if event.tokens <= 1:
+            continue
+        coverage = len(event.experts) / trace.expert_count
+        size = trace.slice_bytes[event.layer]
+        result.events += 1
+        result.coverage_sum += coverage
+        result.over30 += coverage >= 0.3
+        result.over50 += coverage >= 0.5
+        result.selected_bytes += len(event.experts) * size
+        result.layer_bytes += trace.expert_count * size
+    return result
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("trace")
@@ -264,6 +348,29 @@ def main() -> None:
     print()
     print("Belady zná budoucnost – je to strop pro danou velikost, ne použitelná politika.")
     print("Velký rozdíl LRU vs. Belady = páka je v politice (co držet), ne ve velikosti cache.")
+
+    guesses = prediction_stats(trace)
+    if guesses:
+        print()
+        print("předpověď expertů (generování)")
+        print(f"{'ODHAD':<28} {'TREFÍ':>7} {'NAVÍC':>7}")
+        for label, guess in guesses.items():
+            print(f"{label:<28} {guess.recall * 100:6.1f}% {guess.waste * 100:6.1f}%")
+        if not trace.has_predictions:
+            print("(odhad z routeru chybí – záznam verze 1 nebo model bez routerů v F32/F16/BF16)")
+        print("TREFÍ = podíl potřebných bajtů, které by odhad načetl dopředu.")
+        print("NAVÍC = zbytečně přečtené bajty vůči potřebným (100 % = dvojnásobné čtení).")
+
+    coverage = prefill_coverage(trace)
+    if coverage.events:
+        print()
+        print("prefill – pokrytí vrstev")
+        print(f"průměrně vybráno {coverage.coverage_sum / coverage.events * 100:.0f} % expertů vrstvy"
+              f" · vrstev s ≥ 30 %: {coverage.over30 / coverage.events * 100:.0f} %"
+              f" · s ≥ 50 %: {coverage.over50 / coverage.events * 100:.0f} %")
+        print(f"vybraní experti {coverage.selected_bytes / GB:.2f} GB, celé vrstvy {coverage.layer_bytes / GB:.2f} GB")
+        print("Přečíst celou vrstvu sekvenčně se vyplatí, když pokrytí > (rychlost čtení po stránkách")
+        print("÷ sekvenční rychlost) – s naměřenými ~1,1 a ~3,7 GB/s zhruba od 30 %.")
 
 
 if __name__ == "__main__":

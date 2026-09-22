@@ -16,11 +16,15 @@ struct FinFillScreen: View {
                     NavigationLink {
                         GoogleAccountView()
                     } label: {
-                        Image(systemName: auth.isSignedIn && auth.hasAllScopes ? "person.crop.circle.badge.checkmark" : "person.crop.circle.badge.exclamationmark")
+                        Image(systemName: accountSymbol)
                     }
                     .accessibilityLabel("Google účet")
                 }
             }
+    }
+
+    private var accountSymbol: String {
+        auth.isSignedIn && auth.hasAllScopes ? "person.crop.circle.badge.checkmark" : "person.crop.circle.badge.exclamationmark"
     }
 }
 
@@ -49,8 +53,7 @@ struct GoogleAccountView: View {
 
             Section {
                 LabeledContent("Stav") {
-                    Text(!auth.isSignedIn ? "Nepřihlášeno" : auth.hasAllScopes ? "Přihlášeno" : "Chybí oprávnění")
-                        .foregroundStyle(!auth.isSignedIn ? .secondary : auth.hasAllScopes ? .green : .orange)
+                    Text(statusText).foregroundStyle(statusColor)
                 }
                 if auth.isSignedIn && auth.hasAllScopes {
                     Button("Odhlásit", role: .destructive) { auth.signOut() }
@@ -60,8 +63,11 @@ struct GoogleAccountView: View {
                             do { try await auth.signIn() } catch { auth.lastError = error.localizedDescription }
                         }
                     } label: {
-                        if auth.isWorking { ProgressView() }
-                        else { Text(auth.isSignedIn ? "Přihlásit znovu (přidat přístup k seznamu sešitů)" : "Přihlásit se ke Google") }
+                        if auth.isWorking {
+                            ProgressView()
+                        } else {
+                            Text(signInTitle)
+                        }
                     }
                     .disabled(auth.redirectScheme == nil || auth.isWorking)
                 }
@@ -84,5 +90,19 @@ struct GoogleAccountView: View {
         }
         .navigationTitle("Google účet")
         .navigationBarTitleDisplayMode(.inline)
+    }
+
+    private var statusText: String {
+        if !auth.isSignedIn { return "Nepřihlášeno" }
+        return auth.hasAllScopes ? "Přihlášeno" : "Chybí oprávnění"
+    }
+
+    private var statusColor: Color {
+        if !auth.isSignedIn { return Color.secondary }
+        return auth.hasAllScopes ? Color.green : Color.orange
+    }
+
+    private var signInTitle: String {
+        auth.isSignedIn ? "Přihlásit znovu (přidat přístup k seznamu sešitů)" : "Přihlásit se ke Google"
     }
 }

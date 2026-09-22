@@ -90,7 +90,7 @@ struct SettingsView: View {
                     } label: {
                         LabeledContent {
                             Text(GoogleAuth.shared.isSignedIn ? "Připojeno" : "Nepřipojeno")
-                                .foregroundStyle(GoogleAuth.shared.isSignedIn ? .green : .secondary)
+                                .foregroundStyle(GoogleAuth.shared.isSignedIn ? Color.green : Color.secondary)
                         } label: {
                             Label("Google účet", systemImage: "person.crop.circle")
                         }

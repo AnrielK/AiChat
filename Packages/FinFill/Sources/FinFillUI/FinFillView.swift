@@ -56,7 +56,7 @@ public struct FinFillView: View {
                 LabeledContent {
                     Text(model.spreadsheetName ?? (model.spreadsheet.isEmpty ? "Vybrat…" : "Zadáno ručně"))
                         .lineLimit(1)
-                        .foregroundStyle(model.spreadsheet.isEmpty ? Color.accentColor : .secondary)
+                        .foregroundStyle(model.spreadsheet.isEmpty ? Color.accentColor : Color.secondary)
                 } label: {
                     Label("Sešit", systemImage: "tablecells")
                 }
@@ -186,7 +186,7 @@ public struct FinFillView: View {
                         Spacer()
                         Text(p.action == .write ? "zapsat" : p.action == .skipNotEmpty ? "přeskočit" : "chybí data")
                             .font(.caption2)
-                            .foregroundStyle(p.action == .write ? .green : .orange)
+                            .foregroundStyle(p.action == .write ? Color.green : Color.orange)
                     }
                     Text(p.label).font(.subheadline)
                     Text(p.content?.display ?? "—").font(.callout.monospaced())

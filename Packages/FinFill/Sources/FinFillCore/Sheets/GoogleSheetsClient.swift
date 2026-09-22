@@ -90,6 +90,74 @@ public struct GoogleSheetsClient: Sendable {
         _ = try await request("POST", "\(spreadsheetID):batchUpdate", json: body)
     }
 
+    public struct SheetInfo: Sendable {
+        public let title: String
+        public let sheetId: Int
+        public let columnCount: Int
+    }
+
+    /// Title, numeric sheetId (needed by structural requests) and grid width of every tab.
+    public func sheetInfo() async throws -> [SheetInfo] {
+        struct Resp: Decodable {
+            struct S: Decodable {
+                struct P: Decodable {
+                    struct G: Decodable { let columnCount: Int? }
+                    let title: String; let sheetId: Int; let gridProperties: G?
+                }
+                let properties: P
+            }
+            let sheets: [S]
+        }
+        let data = try await request("GET", "\(spreadsheetID)?fields=properties.title,sheets.properties(title,sheetId,gridProperties.columnCount)")
+        return try JSONDecoder().decode(Resp.self, from: data).sheets.map {
+            SheetInfo(title: $0.properties.title, sheetId: $0.properties.sheetId,
+                      columnCount: $0.properties.gridProperties?.columnCount ?? 26)
+        }
+    }
+
+    /// Spreadsheet title (for showing a manually entered ID).
+    public func title() async throws -> String {
+        let data = try await request("GET", "\(spreadsheetID)?fields=properties.title")
+        let json = try JSONSerialization.jsonObject(with: data) as? [String: Any]
+        return ((json?["properties"] as? [String: Any])?["title"] as? String) ?? spreadsheetID
+    }
+
+    public struct Created: Sendable {
+        public let spreadsheetID: String
+        public let url: URL
+        public let sheetIds: [String: Int]
+    }
+
+    /// Creates a new spreadsheet (lands in the root of the user's Drive) — `spreadsheetID` of this
+    /// client is ignored. Body from `TemplateRequests.createBody`.
+    public static func create(body: [String: Any], tokens: AccessTokenProvider,
+                              session: URLSession = .shared) async throws -> Created {
+        var req = URLRequest(url: URL(string: "https://sheets.googleapis.com/v4/spreadsheets")!)
+        req.httpMethod = "POST"
+        req.setValue("Bearer \(try await tokens.accessToken())", forHTTPHeaderField: "Authorization")
+        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        req.httpBody = try JSONSerialization.data(withJSONObject: body)
+        let (data, resp) = try await HTTP(session: session).send(req)
+        guard (200..<300).contains(resp.statusCode) else {
+            throw SheetsError.http(resp.statusCode, String(decoding: data, as: UTF8.self))
+        }
+        let json = (try JSONSerialization.jsonObject(with: data) as? [String: Any]) ?? [:]
+        guard let id = json["spreadsheetId"] as? String else { throw SheetsError.http(resp.statusCode, "missing spreadsheetId") }
+        var ids: [String: Int] = [:]
+        for s in (json["sheets"] as? [[String: Any]]) ?? [] {
+            if let p = s["properties"] as? [String: Any], let t = p["title"] as? String, let sid = p["sheetId"] as? Int { ids[t] = sid }
+        }
+        let url = (json["spreadsheetUrl"] as? String).flatMap(URL.init(string:))
+            ?? URL(string: "https://docs.google.com/spreadsheets/d/\(id)/edit")!
+        return Created(spreadsheetID: id, url: url, sheetIds: ids)
+    }
+
+    /// spreadsheets.batchUpdate with raw requests (insertDimension, copyPaste, ...), applied atomically.
+    public func structuralUpdate(_ requests: [[String: Any]]) async throws {
+        guard !requests.isEmpty else { return }
+        _ = try await request("POST", "\(spreadsheetID):batchUpdate", json: ["requests": requests])
+    }
+
     func request(_ method: String, _ path: String, json: [String: Any]? = nil) async throws -> Data {
         var req = URLRequest(url: URL(string: base + path)!)
         req.httpMethod = method

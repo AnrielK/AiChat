@@ -1,3 +1,111 @@
+# FinFill: univerzální šablona a nové sešity
+
+## Nový sešit ze šablony
+
+Tlačítko **Nový sešit ze šablony (9 let)** založí přes Sheets API nový Google sešit (listy
+DCF, WACC, IncomeStatement, BalanceSheets, CashFlowStatement se vzorci i formátem) a vyplní
+9 fiskálních let končících posledním 10-K (nebo rokem v poli Fiskální rok). Sešit se pak
+rovnou vybere pro další práci. Leží v kořeni Disku Google (do složky by bylo potřeba plné
+oprávnění k Disku).
+
+- Starší roky se berou z companyfacts, přednost má **naposledy podaný** údaj (přepočty,
+  splity akcií – EPS a počty akcií jsou v celé řadě srovnatelné).
+- Každý rok má vlastní kontroly a dorovnání; rok s nesedící kontrolou zůstane prázdný.
+- Výkaz, který za daný rok v datech není (10-K má 3 výsledovky, ale 2 rozvahy), se nevyplní
+  nulami, sloupec zůstane prázdný.
+- První sloupec: „hotovost na začátku“ nemá předchozí sloupec, bere se zůstatek z konce
+  předchozího roku (`opening` v mapování).
+
+## Univerzální šablona
+
+`Resources/templates/valuation-universal.json` vzniká z NVDA sešitu nástrojem
+`tools/finfill-template.py --universal`:
+
+- výkazy: 9 sloupců G–O, typovaná čísla pryč (i vzorce jako `=(1112+6081+4500)-M12`),
+  součty a poměry zůstávají, hlavička `G2 = první rok`, dál `=G2+1`,
+- ř. 3 „Revenue“ (celkové tržby), ř. 4 „Other revenue“ – univerzální mapování nepočítá
+  se segmenty,
+- **DCF se posouvá sám:** roky `=MAX(IncomeStatement!$G$2:$Z$2)-4`, historie přes
+  `INDEX/MATCH` podle roku. Po přidání sloupce dalšího roku (vytvoření sloupce z minula)
+  se DCF posune o rok bez úprav,
+- předpoklady z historie firmy místo čísel NVIDIE: růst `=MIN(MEDIAN(4 roky), poslední)`,
+  EBIT marže začíná poslední skutečnou a končí průměrem, D&A / CapEx / ΔNWC jako průměr
+  % z tržeb, WACC scénáře = `WACC!D22 ± 0,5 %`, beta a cena z `GOOGLEFINANCE`,
+  daň = poslední efektivní sazba, přepínače scénářů na základní (2),
+- zástupné hodnoty `{{TICKER}}`, `{{FY_FIRST}}`, `{{TODAY}}`, `{{FYEND}}`.
+
+Ověřeno v LibreOffice na plně vyplněném sešitu (2018–2023 z původní tabulky, 2024–2026
+z FinFillu): žádná chybová buňka, aktiva = pasiva, konečná hotovost v CF = rozvaha,
+DCF 2022–2026 → projekce 2027–2031.
+
+Vlastní šablonu jde udělat stejně: upravit sešit v Google Sheets, stáhnout jako .xlsx
+a pustit nástroj (bez `--universal` se převezme tak, jak je).
+
+## Ostatní
+
+- Volba **Mapování**: Univerzální (výchozí) / NVDA (segmenty) pro původní sešit.
+- Nový stav kontroly „chybí data“: dorovnání se nepoužije, když chybí jiný než dorovnávací
+  řádek (FY2024 v NVDA 10-K: VK z výkazu změn VK by jinak skončil celý v „ostatním“).
+- Vytvoření sloupce roku maže i vzorce s ručně zadanými čísly.
+- CLI: `finfill new --ticker AMD --ua … --token …`, offline `local --universal --all-years`.
+
+Testy: 18.
+
+---
+
+# FinFill: výběr sešitu, nový sloupec roku, jiné firmy než NVIDIA
+
+## Výběr sešitu z Disku Google
+
+Místo kopírování URL tlačítko **Sešit** otevře seznam Google Sheets (Drive API, řazeno podle
+poslední změny, hledání podle názvu). Ruční URL/ID zůstává pod „Zadat URL nebo ID ručně“.
+Nové oprávnění `drive.metadata.readonly` – jen názvy souborů, ne obsah. Stávající přihlášení
+ho nemá, aplikace si o nové přihlášení řekne sama (Nastavení › Google účet ukazuje „Chybí
+oprávnění“). V Google Cloud Console je potřeba zapnout **Google Drive API** a přidat scope.
+Soubor .xlsx nahraný na Disk v seznamu není – Sheets API upravuje jen nativní Google Sheets.
+
+## Chybějící sloupec roku se vytvoří
+
+Dřív: „no column with year 2023 in the header row“. Teď, když v listu chybí jen následující
+rok, se při zápisu:
+
+1. vloží sloupec hned za předchozí rok (`insertDimension`, převezme šířku),
+2. zkopíruje do něj předchozí sloupec **se vzorci i formátem** (`copyPaste PASTE_NORMAL` –
+   relativní odkazy se posunou: `=K3+K4` → `=L3+L4`, `=J2+1` → `=K2+1`),
+3. vymažou se ručně zadaná čísla minulého roku (hodnoty a vzorce bez odkazů jako
+   `=6283+1793`) a všechny mapované řádky, rok v hlavičce se zapíše, pokud tam nebyl vzorec,
+4. zapíšou se nová data.
+
+Náhled nic nemění, jen ukáže „Nové sloupce“. Mezera (poslední 2020, chceš 2023) se odmítne
+s návodem doplnit nejdřív 2021 a 2022. Vložení sloupce posune odkazy vpravo od něj, ale
+nerozšíří rozsahy typu `SUM(G5:K5)` v jiných listech – ty je potřeba upravit ručně.
+
+## Jiné firmy (AMD)
+
+Mapování bylo psané pro NVIDII – segmenty hledalo pod `nvda:GraphicsSegmentMember`, tržby
+vyšly 0 a všechny kontroly padly. Teď:
+
+- **Dorovnání:** každá kontrola má řádek „ostatní“ (`plugRow`), kam se rozdíl oproti vykázanému
+  součtu zapíše: neznámé segmenty → celé tržby do ř. 3, položky navíc ve výsledovce (AMD:
+  amortizace, restrukturalizace, licenční zisk) → ř. 10, rozvaha → ostatní aktiva/závazky,
+  CF → ostatní. Kontroly jdou postupně, další vidí už dorovnané hodnoty. Dorovnání je vidět
+  oranžově u kontroly i u buňky a ve vzorci jako další sčítanec. NVIDIA žádné nepotřebuje.
+- **Alternativní koncepty** součtů (`RevenueFromContractWithCustomerExcludingAssessedTax`,
+  `ProfitLoss`, `…IncludingPortionAttributableToNoncontrollingInterest`, …).
+- Součet, který firma netaguje, je „netagováno“ (šedě) a zápis neblokuje.
+
+## Drobnosti
+
+- Po chybě už nezůstává výsledek předchozího běhu; změna tickeru, roku nebo sešitu náhled zruší.
+- Rok v nadpisu kontrol bez oddělovače tisíců („FY2 022“ → „FY2022“).
+- Klávesnice s číslicemi má „Hotovo“ a schová se posunutím.
+
+Testy: 15 (nové: dorovnání neznámých segmentů a chybějícího řádku, netagovaný součet,
+vytvoření sloupce a výběr řádků k vymazání, odkazy ve vzorcích, plán pro nový sloupec,
+seznam z Drive API).
+
+---
+
 # 10-K → Google Sheets (FinFill)
 
 Nový lokální balíček **`Packages/FinFill`** (vedle `LlamaCpp`, target používá `FinFillCore`

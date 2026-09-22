@@ -16,7 +16,7 @@ struct FinFillScreen: View {
                     NavigationLink {
                         GoogleAccountView()
                     } label: {
-                        Image(systemName: auth.isSignedIn ? "person.crop.circle.badge.checkmark" : "person.crop.circle.badge.exclamationmark")
+                        Image(systemName: auth.isSignedIn && auth.hasAllScopes ? "person.crop.circle.badge.checkmark" : "person.crop.circle.badge.exclamationmark")
                     }
                     .accessibilityLabel("Google účet")
                 }
@@ -49,10 +49,10 @@ struct GoogleAccountView: View {
 
             Section {
                 LabeledContent("Stav") {
-                    Text(auth.isSignedIn ? "Přihlášeno" : "Nepřihlášeno")
-                        .foregroundStyle(auth.isSignedIn ? .green : .secondary)
+                    Text(!auth.isSignedIn ? "Nepřihlášeno" : auth.hasAllScopes ? "Přihlášeno" : "Chybí oprávnění")
+                        .foregroundStyle(!auth.isSignedIn ? .secondary : auth.hasAllScopes ? .green : .orange)
                 }
-                if auth.isSignedIn {
+                if auth.isSignedIn && auth.hasAllScopes {
                     Button("Odhlásit", role: .destructive) { auth.signOut() }
                 } else {
                     Button {
@@ -60,7 +60,8 @@ struct GoogleAccountView: View {
                             do { try await auth.signIn() } catch { auth.lastError = error.localizedDescription }
                         }
                     } label: {
-                        if auth.isWorking { ProgressView() } else { Text("Přihlásit se ke Google") }
+                        if auth.isWorking { ProgressView() }
+                        else { Text(auth.isSignedIn ? "Přihlásit znovu (přidat přístup k seznamu sešitů)" : "Přihlásit se ke Google") }
                     }
                     .disabled(auth.redirectScheme == nil || auth.isWorking)
                 }
@@ -70,8 +71,8 @@ struct GoogleAccountView: View {
 
             Section("Jak získat client ID") {
                 Text("""
-                1. console.cloud.google.com → nový projekt → APIs & Services → Enable APIs → Google Sheets API.
-                2. OAuth consent screen: External, stav Testing, přidej svůj Gmail mezi Test users, scope …/auth/spreadsheets.
+                1. console.cloud.google.com → nový projekt → APIs & Services → Enable APIs → Google Sheets API a Google Drive API.
+                2. OAuth consent screen: External, stav Testing, přidej svůj Gmail mezi Test users, scopes …/auth/spreadsheets a …/auth/drive.metadata.readonly (jen názvy souborů pro výběr sešitu).
                 3. Credentials → Create OAuth client ID → iOS, Bundle ID: \(Bundle.main.bundleIdentifier ?? "—").
                 4. Client ID vlož sem a přihlas se.
 

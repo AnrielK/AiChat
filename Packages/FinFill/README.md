@@ -21,14 +21,15 @@ SEC companyfacts JSON ─┐                        ┌─ kontroly součtů (14
 | `Sources/FinFillCore/SEC` | `SECClient` (ticker→CIK, companyfacts, submissions, stažení 10-K), `CompanyFactsParser`, `InlineXBRLParser` (včetně dimenzí = segmenty), `HTMLText` |
 | `Sources/FinFillCore/Models` | `Fact`, `FactStore` (výběr faktu pro fiskální rok, jednotku a dimenze) |
 | `Sources/FinFillCore/Mapping` | `TemplateMapping` (JSON), `MappingResolver` (hodnota + vzorec buňky), `Validator` (kontroly + backtest) |
-| `Sources/FinFillCore/Sheets` | `GoogleSheetsClient` (REST v4, bez SDK), `SheetPlanner` (najde sloupec roku, nepřepisuje vyplněné buňky) |
+| `Sources/FinFillCore/Sheets` | `GoogleSheetsClient` (REST v4, bez SDK), `GoogleDriveClient` (seznam sešitů), `SheetPlanner` (sloupec roku, vytvoření chybějícího, nepřepisuje vyplněné buňky) |
 | `Sources/FinFillCore/Summary` | `FilingSections`, `KeyFigures` (čísla do souhrnu počítaná kódem), `Summarizer` (map-reduce) |
 | `Sources/FinFillCore/LLM` | protokol `LLMEngine`, `OpenAICompatibleEngine`, odstraňování `<think>` |
 | `Sources/FinFillCore/Pipeline` | `FinFillPipeline` — celý běh s událostmi pro UI |
 | `Sources/FinFillCore/Resources/nvda-valuation-5y.json` | mapování tvé šablony (IncomeStatement / BalanceSheets / CashFlowStatement) |
 | `Sources/FinFillUI/FinFillView.swift` | SwiftUI obrazovka (iOS 17+): náhled → zápis → souhrn |
 | `Sources/finfill-cli` | CLI pro Mac (offline nad staženým 10-K, nebo online do Sheets) |
-| `Tests/` | 8 testů nad přiloženým NVDA 10-K |
+| `Sources/FinFillCore/Templates` | `SpreadsheetTemplate` + `TemplateRequests` (Sheets API create/updateCells/merge/šířky), `WorkbookFiller` (všechny roky) |
+| `Tests/` | 18 testů nad přiloženým NVDA 10-K |
 
 `FinFillCore` je čistý Foundation (běží na iOS, macOS i Linuxu), `FinFillUI` jen na iOS.
 
@@ -73,9 +74,28 @@ SEC vyžaduje `User-Agent` ve tvaru `Jméno email` a max. 10 požadavků/s (FinF
 Companyfacts **neobsahuje dimenzionální fakta**, proto se segmenty (Graphics / Compute & Networking)
 berou z iXBRL přímo z 10-K, který se stahuje i kvůli souhrnu.
 
+## Nový sešit ze šablony
+
+`FinFillPipeline.createWorkbook(template:)` založí Google sešit z `SpreadsheetTemplate`
+(`Resources/templates/valuation-universal.json` – výkazy + DCF + WACC, vzorce a formát)
+a `WorkbookFiller` vyplní všechny roky, které SEC data pokrývají (9 let končících 10-K).
+DCF v univerzální šabloně hledá roky přes `INDEX/MATCH`, takže se s novým sloupcem posune.
+
+Šablona se generuje z .xlsx:
+
+```bash
+python3 tools/finfill-template.py "Valuation.xlsx" --universal \
+  --json Packages/FinFill/Sources/FinFillCore/Resources/templates/valuation-universal.json
+```
+
 ## Jak se zapisuje
 
 - Sloupec se najde podle roku v řádku 2 (`O2 = 2026`), předchozí sloupec je `{prev}`.
+- Když sloupec pro rok chybí a list končí předchozím rokem, vloží se nový sloupec, zkopíruje se
+  do něj předchozí (vzorce + formát), vymažou se ručně zadaná čísla a mapované řádky a zapíše se.
+- Kontroly mají řádek na dorovnání (`plugRow`): rozdíl oproti vykázanému součtu jde do řádku
+  „ostatní“ a je vidět v UI i ve vzorci. Díky tomu šablona funguje i pro firmy s jinými
+  segmenty a položkami (AMD).
 - Zapisují se jen řádky se vstupními daty; řádky se vzorci (součty, marže, NWC) se nemění.
 - Jedna položka → číslo. Víc položek → vzorec ve stylu šablony, aby byl vidět původ:
   `=10383+2867`, `=21352-O21`, `=11226+15157+84-40616-17502`, `={prev}30`.
@@ -126,5 +146,5 @@ buňky a kontroly bez sítě.
 ## Testy
 
 ```bash
-swift test          # 8 testů: iXBRL, mapování FY2026, backtest FY2025 vs. šablona, plánovač, sekce, souhrn (mock), companyfacts, helpery
+swift test          # 18 testů: iXBRL, mapování FY2026, backtest FY2025 vs. šablona, plánovač, sekce, souhrn (mock), companyfacts, helpery
 ```

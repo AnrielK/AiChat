@@ -2,151 +2,1081 @@
   "name": "NVDA Valuation - 5y",
   "description": "Mapping of SEC XBRL concepts to the IncomeStatement / BalanceSheets / CashFlowStatement sheets. Values in USD millions, like the template.",
   "headerRow": 2,
-  "defaults": { "unit": "USD", "scale": 1000000, "decimals": 0 },
+  "defaults": {
+    "unit": "USD",
+    "scale": 1000000,
+    "decimals": 0
+  },
   "rows": [
-    { "sheet": "IncomeStatement", "row": 3, "label": "Graphics", "period": "duration",
-      "terms": [ { "c": ["us-gaap:Revenues", "us-gaap:RevenueFromContractWithCustomerExcludingAssessedTax"],
-                   "dims": { "us-gaap:StatementBusinessSegmentsAxis": "nvda:GraphicsSegmentMember" } } ] },
-    { "sheet": "IncomeStatement", "row": 4, "label": "Compute & Networking", "period": "duration",
-      "terms": [ { "c": ["us-gaap:Revenues", "us-gaap:RevenueFromContractWithCustomerExcludingAssessedTax"],
-                   "dims": { "us-gaap:StatementBusinessSegmentsAxis": "nvda:ComputeAndNetworkingSegmentMember" } } ] },
-    { "sheet": "IncomeStatement", "row": 6, "label": "Cost of revenue", "period": "duration",
-      "terms": [ { "c": ["us-gaap:CostOfRevenue", "us-gaap:CostOfGoodsAndServicesSold"] } ] },
-    { "sheet": "IncomeStatement", "row": 9, "label": "Research and development", "period": "duration",
-      "terms": [ { "c": ["us-gaap:ResearchAndDevelopmentExpense"] } ] },
-    { "sheet": "IncomeStatement", "row": 10, "label": "Selling General & Admin Expenses", "period": "duration",
-      "terms": [ { "c": ["us-gaap:SellingGeneralAndAdministrativeExpense"] } ] },
-    { "sheet": "IncomeStatement", "row": 12, "label": "Other income, net", "period": "duration",
-      "terms": [ { "c": ["us-gaap:NonoperatingIncomeExpense"] } ] },
-    { "sheet": "IncomeStatement", "row": 14, "label": "Provision for income taxes", "period": "duration",
-      "terms": [ { "c": ["us-gaap:IncomeTaxExpenseBenefit"] } ] },
-    { "sheet": "IncomeStatement", "row": 19, "label": "EPS basic", "period": "duration",
-      "unit": "USD/shares", "scale": 1, "decimals": 2,
-      "terms": [ { "c": ["us-gaap:EarningsPerShareBasic"] } ] },
-    { "sheet": "IncomeStatement", "row": 20, "label": "EPS diluted", "period": "duration",
-      "unit": "USD/shares", "scale": 1, "decimals": 2,
-      "terms": [ { "c": ["us-gaap:EarningsPerShareDiluted"] } ] },
-    { "sheet": "IncomeStatement", "row": 22, "label": "Weighted avg shares basic", "period": "duration",
+    {
+      "sheet": "IncomeStatement",
+      "row": 3,
+      "label": "Graphics (segment)",
+      "period": "duration",
+      "terms": [
+        {
+          "c": [
+            "us-gaap:Revenues",
+            "us-gaap:RevenueFromContractWithCustomerExcludingAssessedTax"
+          ],
+          "dims": {
+            "us-gaap:StatementBusinessSegmentsAxis": "nvda:GraphicsSegmentMember"
+          },
+          "optional": true
+        }
+      ]
+    },
+    {
+      "sheet": "IncomeStatement",
+      "row": 4,
+      "label": "Compute & Networking (segment)",
+      "period": "duration",
+      "terms": [
+        {
+          "c": [
+            "us-gaap:Revenues",
+            "us-gaap:RevenueFromContractWithCustomerExcludingAssessedTax"
+          ],
+          "dims": {
+            "us-gaap:StatementBusinessSegmentsAxis": "nvda:ComputeAndNetworkingSegmentMember"
+          },
+          "optional": true
+        }
+      ]
+    },
+    {
+      "sheet": "IncomeStatement",
+      "row": 6,
+      "label": "Cost of revenue",
+      "period": "duration",
+      "terms": [
+        {
+          "c": [
+            "us-gaap:CostOfRevenue",
+            "us-gaap:CostOfGoodsAndServicesSold"
+          ]
+        }
+      ]
+    },
+    {
+      "sheet": "IncomeStatement",
+      "row": 9,
+      "label": "Research and development",
+      "period": "duration",
+      "terms": [
+        {
+          "c": [
+            "us-gaap:ResearchAndDevelopmentExpense"
+          ]
+        }
+      ]
+    },
+    {
+      "sheet": "IncomeStatement",
+      "row": 10,
+      "label": "Selling General & Admin Expenses",
+      "period": "duration",
+      "terms": [
+        {
+          "c": [
+            "us-gaap:SellingGeneralAndAdministrativeExpense"
+          ]
+        }
+      ]
+    },
+    {
+      "sheet": "IncomeStatement",
+      "row": 12,
+      "label": "Other income, net",
+      "period": "duration",
+      "terms": [
+        {
+          "c": [
+            "us-gaap:NonoperatingIncomeExpense"
+          ]
+        }
+      ]
+    },
+    {
+      "sheet": "IncomeStatement",
+      "row": 14,
+      "label": "Provision for income taxes",
+      "period": "duration",
+      "terms": [
+        {
+          "c": [
+            "us-gaap:IncomeTaxExpenseBenefit"
+          ]
+        }
+      ]
+    },
+    {
+      "sheet": "IncomeStatement",
+      "row": 19,
+      "label": "EPS basic",
+      "period": "duration",
+      "unit": "USD/shares",
+      "scale": 1,
+      "decimals": 2,
+      "terms": [
+        {
+          "c": [
+            "us-gaap:EarningsPerShareBasic"
+          ]
+        }
+      ]
+    },
+    {
+      "sheet": "IncomeStatement",
+      "row": 20,
+      "label": "EPS diluted",
+      "period": "duration",
+      "unit": "USD/shares",
+      "scale": 1,
+      "decimals": 2,
+      "terms": [
+        {
+          "c": [
+            "us-gaap:EarningsPerShareDiluted"
+          ]
+        }
+      ]
+    },
+    {
+      "sheet": "IncomeStatement",
+      "row": 22,
+      "label": "Weighted avg shares basic",
+      "period": "duration",
       "unit": "shares",
-      "terms": [ { "c": ["us-gaap:WeightedAverageNumberOfSharesOutstandingBasic"] } ] },
-    { "sheet": "IncomeStatement", "row": 23, "label": "Weighted avg shares diluted", "period": "duration",
+      "terms": [
+        {
+          "c": [
+            "us-gaap:WeightedAverageNumberOfSharesOutstandingBasic"
+          ]
+        }
+      ]
+    },
+    {
+      "sheet": "IncomeStatement",
+      "row": 23,
+      "label": "Weighted avg shares diluted",
+      "period": "duration",
       "unit": "shares",
-      "terms": [ { "c": ["us-gaap:WeightedAverageNumberOfDilutedSharesOutstanding"] } ] },
-
-    { "sheet": "BalanceSheets", "row": 3, "label": "Cash and cash equivalents", "period": "instant",
-      "terms": [ { "c": ["us-gaap:CashAndCashEquivalentsAtCarryingValue"] } ] },
-    { "sheet": "BalanceSheets", "row": 4, "label": "Short-term Investments", "period": "instant",
-      "terms": [ { "c": ["nvda:MarketableSecuritiesAndEquitySecuritiesFVNI", "us-gaap:ShortTermInvestments",
-                         "us-gaap:MarketableSecuritiesCurrent", "us-gaap:AvailableForSaleSecuritiesDebtSecuritiesCurrent"] } ] },
-    { "sheet": "BalanceSheets", "row": 6, "label": "Accounts receivable, net", "period": "instant",
-      "terms": [ { "c": ["us-gaap:AccountsReceivableNetCurrent"] } ] },
-    { "sheet": "BalanceSheets", "row": 7, "label": "Inventories", "period": "instant",
-      "terms": [ { "c": ["us-gaap:InventoryNet"] } ] },
-    { "sheet": "BalanceSheets", "row": 8, "label": "Other current assets", "period": "instant",
-      "terms": [ { "c": ["us-gaap:PrepaidExpenseAndOtherAssetsCurrent", "us-gaap:OtherAssetsCurrent"] } ] },
-    { "sheet": "BalanceSheets", "row": 10, "label": "PP&E net (+ operating lease ROU)", "period": "instant",
-      "terms": [ { "c": ["us-gaap:PropertyPlantAndEquipmentNet"] },
-                 { "c": ["us-gaap:OperatingLeaseRightOfUseAsset"], "optional": true } ] },
-    { "sheet": "BalanceSheets", "row": 11, "label": "Goodwill", "period": "instant",
-      "terms": [ { "c": ["us-gaap:Goodwill"] } ] },
-    { "sheet": "BalanceSheets", "row": 12, "label": "Long-term Investments", "period": "instant",
-      "terms": [ { "c": ["us-gaap:EquitySecuritiesFVNINoncurrent", "us-gaap:LongTermInvestments"], "optional": true } ] },
-    { "sheet": "BalanceSheets", "row": 13, "label": "Other non-current assets", "period": "instant",
-      "terms": [ { "c": ["us-gaap:IntangibleAssetsNetExcludingGoodwill"], "optional": true },
-                 { "c": ["us-gaap:DeferredIncomeTaxAssetsNet"], "optional": true },
-                 { "c": ["us-gaap:OtherAssetsNoncurrent"], "optional": true } ] },
-    { "sheet": "BalanceSheets", "row": 18, "label": "Accounts payable", "period": "instant",
-      "terms": [ { "c": ["us-gaap:AccountsPayableCurrent"] } ] },
-    { "sheet": "BalanceSheets", "row": 19, "label": "Short-term Borrowings", "period": "instant",
-      "terms": [ { "c": ["us-gaap:ShortTermBorrowings", "us-gaap:CommercialPaper"], "optional": true } ] },
-    { "sheet": "BalanceSheets", "row": 20, "label": "Current Portion of LT Debt", "period": "instant",
-      "terms": [ { "c": ["us-gaap:LongTermDebtCurrent", "us-gaap:DebtCurrent"], "optional": true } ] },
-    { "sheet": "BalanceSheets", "row": 21, "label": "Current Portion of Lease Obligations", "period": "instant",
-      "terms": [ { "c": ["us-gaap:OperatingLeaseLiabilityCurrent"], "optional": true } ] },
-    { "sheet": "BalanceSheets", "row": 22, "label": "Other current liabilities (accrued - lease current)", "period": "instant",
-      "terms": [ { "c": ["us-gaap:AccruedLiabilitiesCurrent"] } ],
-      "refs": [ { "row": 21, "sign": -1 } ] },
-    { "sheet": "BalanceSheets", "row": 24, "label": "Long-term debt", "period": "instant",
-      "terms": [ { "c": ["us-gaap:LongTermDebtNoncurrent"], "optional": true } ] },
-    { "sheet": "BalanceSheets", "row": 25, "label": "Lease liabilities non-current", "period": "instant",
-      "terms": [ { "c": ["us-gaap:OperatingLeaseLiabilityNoncurrent"], "optional": true } ] },
-    { "sheet": "BalanceSheets", "row": 26, "label": "Other non-current liabilities", "period": "instant",
-      "terms": [ { "c": ["us-gaap:OtherLiabilitiesNoncurrent"], "optional": true } ] },
-    { "sheet": "BalanceSheets", "row": 29, "label": "Common stock", "period": "instant",
-      "terms": [ { "c": ["us-gaap:CommonStockValue"], "optional": true } ] },
-    { "sheet": "BalanceSheets", "row": 30, "label": "Additional paid-in capital", "period": "instant",
-      "terms": [ { "c": ["us-gaap:AdditionalPaidInCapital", "us-gaap:AdditionalPaidInCapitalCommonStock"] } ] },
-    { "sheet": "BalanceSheets", "row": 31, "label": "Retained earnings", "period": "instant",
-      "terms": [ { "c": ["us-gaap:RetainedEarningsAccumulatedDeficit"] } ] },
-    { "sheet": "BalanceSheets", "row": 32, "label": "Treasury stock", "period": "instant",
-      "terms": [ { "c": ["us-gaap:TreasuryStockValue", "us-gaap:TreasuryStockCommonValue"], "sign": -1, "optional": true } ] },
-    { "sheet": "BalanceSheets", "row": 33, "label": "Other Common Equity Adj (AOCI)", "period": "instant",
-      "terms": [ { "c": ["us-gaap:AccumulatedOtherComprehensiveIncomeLossNetOfTax"], "optional": true } ] },
-
-    { "sheet": "CashFlowStatement", "row": 3, "label": "Net income", "period": "duration",
-      "terms": [ { "c": ["us-gaap:NetIncomeLoss", "us-gaap:ProfitLoss"] } ] },
-    { "sheet": "CashFlowStatement", "row": 4, "label": "Depreciation and amortization", "period": "duration",
-      "terms": [ { "c": ["us-gaap:DepreciationDepletionAndAmortization", "us-gaap:DepreciationAmortizationAndAccretionNet"] } ] },
-    { "sheet": "CashFlowStatement", "row": 5, "label": "Stock-based compensation", "period": "duration",
-      "terms": [ { "c": ["us-gaap:ShareBasedCompensation"] } ] },
-    { "sheet": "CashFlowStatement", "row": 6, "label": "Other Operating Activities", "period": "duration",
-      "terms": [ { "c": ["us-gaap:DeferredIncomeTaxExpenseBenefit"], "optional": true },
-                 { "c": ["us-gaap:GainLossOnInvestments"], "sign": -1, "optional": true },
-                 { "c": ["us-gaap:OtherNoncashIncomeExpense"], "sign": -1, "optional": true } ] },
-    { "sheet": "CashFlowStatement", "row": 8, "label": "Accounts receivable", "period": "duration",
-      "terms": [ { "c": ["us-gaap:IncreaseDecreaseInAccountsReceivable"], "sign": -1 } ] },
-    { "sheet": "CashFlowStatement", "row": 9, "label": "Inventories", "period": "duration",
-      "terms": [ { "c": ["us-gaap:IncreaseDecreaseInInventories"], "sign": -1 } ] },
-    { "sheet": "CashFlowStatement", "row": 10, "label": "Accounts payable", "period": "duration",
-      "terms": [ { "c": ["us-gaap:IncreaseDecreaseInAccountsPayable"] } ] },
-    { "sheet": "CashFlowStatement", "row": 11, "label": "Change in Other Net Operating Assets", "period": "duration",
-      "terms": [ { "c": ["us-gaap:IncreaseDecreaseInPrepaidDeferredExpenseAndOtherAssets"], "sign": -1, "optional": true },
-                 { "c": ["us-gaap:IncreaseDecreaseInAccruedLiabilitiesAndOtherOperatingLiabilities"], "optional": true },
-                 { "c": ["us-gaap:IncreaseDecreaseInOtherNoncurrentLiabilities"], "optional": true } ] },
-    { "sheet": "CashFlowStatement", "row": 15, "label": "Capital Expenditures", "period": "duration",
-      "terms": [ { "c": ["us-gaap:PaymentsToAcquireProductiveAssets", "us-gaap:PaymentsToAcquirePropertyPlantAndEquipment"], "sign": -1 } ] },
-    { "sheet": "CashFlowStatement", "row": 16, "label": "Cash Acquisitions", "period": "duration",
-      "terms": [ { "c": ["us-gaap:PaymentsToAcquireBusinessesNetOfCashAcquired"], "sign": -1, "optional": true },
-                 { "c": ["us-gaap:PaymentsToAcquireBusinessTwoNetOfCashAcquired"], "sign": -1, "optional": true } ] },
-    { "sheet": "CashFlowStatement", "row": 17, "label": "Other Investing Activities", "period": "duration",
-      "terms": [ { "c": ["us-gaap:ProceedsFromMaturitiesPrepaymentsAndCallsOfAvailableForSaleSecurities"], "optional": true },
-                 { "c": ["us-gaap:ProceedsFromSaleOfAvailableForSaleSecuritiesDebt"], "optional": true },
-                 { "c": ["us-gaap:ProceedsFromSaleOfEquitySecuritiesFvNi"], "optional": true },
-                 { "c": ["us-gaap:PaymentsToAcquireAvailableForSaleSecuritiesDebt"], "sign": -1, "optional": true },
-                 { "c": ["us-gaap:PaymentsToAcquireEquitySecuritiesFvNi"], "sign": -1, "optional": true },
-                 { "c": ["us-gaap:PaymentsForProceedsFromOtherInvestingActivities"], "sign": -1, "optional": true } ] },
-    { "sheet": "CashFlowStatement", "row": 21, "label": "Dividends paid", "period": "duration",
-      "terms": [ { "c": ["us-gaap:PaymentsOfDividends", "us-gaap:PaymentsOfDividendsCommonStock"], "sign": -1, "optional": true } ] },
-    { "sheet": "CashFlowStatement", "row": 22, "label": "Long-Term Debt Issued", "period": "duration",
-      "terms": [ { "c": ["us-gaap:ProceedsFromIssuanceOfLongTermDebt", "us-gaap:ProceedsFromIssuanceOfDebt"], "optional": true } ] },
-    { "sheet": "CashFlowStatement", "row": 23, "label": "Long-Term Debt Repaid", "period": "duration",
-      "terms": [ { "c": ["us-gaap:RepaymentsOfDebt", "us-gaap:RepaymentsOfLongTermDebt"], "sign": -1, "optional": true } ] },
-    { "sheet": "CashFlowStatement", "row": 24, "label": "Repurchase of Common Stock (incl. tax withholding)", "period": "duration",
-      "terms": [ { "c": ["us-gaap:PaymentsForRepurchaseOfCommonStock"], "sign": -1, "optional": true },
-                 { "c": ["us-gaap:PaymentsRelatedToTaxWithholdingForShareBasedCompensation"], "sign": -1, "optional": true } ] },
-    { "sheet": "CashFlowStatement", "row": 25, "label": "Other Financing Activities", "period": "duration",
-      "terms": [ { "c": ["us-gaap:ProceedsFromStockPlans", "us-gaap:ProceedsFromIssuanceOfCommonStock"], "optional": true },
-                 { "c": ["nvda:PaymentsForFinancedPropertyPlantAndEquipmentAndIntangibleAssetsFinancingActivities"], "sign": -1, "optional": true },
-                 { "c": ["us-gaap:ProceedsFromPaymentsForOtherFinancingActivities"], "optional": true } ] },
-    { "sheet": "CashFlowStatement", "row": 28, "label": "Cash at beginning of period", "formula": "={prev}30" },
-    { "sheet": "CashFlowStatement", "row": 29, "label": "Change in cash and cash equivalents", "period": "duration",
-      "terms": [ { "c": ["us-gaap:CashCashEquivalentsRestrictedCashAndRestrictedCashEquivalentsPeriodIncreaseDecreaseIncludingExchangeRateEffect",
-                         "us-gaap:CashAndCashEquivalentsPeriodIncreaseDecrease"] } ] }
+      "terms": [
+        {
+          "c": [
+            "us-gaap:WeightedAverageNumberOfDilutedSharesOutstanding"
+          ]
+        }
+      ]
+    },
+    {
+      "sheet": "BalanceSheets",
+      "row": 3,
+      "label": "Cash and cash equivalents",
+      "period": "instant",
+      "terms": [
+        {
+          "c": [
+            "us-gaap:CashAndCashEquivalentsAtCarryingValue"
+          ]
+        }
+      ]
+    },
+    {
+      "sheet": "BalanceSheets",
+      "row": 4,
+      "label": "Short-term Investments",
+      "period": "instant",
+      "terms": [
+        {
+          "c": [
+            "nvda:MarketableSecuritiesAndEquitySecuritiesFVNI",
+            "us-gaap:ShortTermInvestments",
+            "us-gaap:MarketableSecuritiesCurrent",
+            "us-gaap:AvailableForSaleSecuritiesDebtSecuritiesCurrent"
+          ]
+        }
+      ]
+    },
+    {
+      "sheet": "BalanceSheets",
+      "row": 6,
+      "label": "Accounts receivable, net",
+      "period": "instant",
+      "terms": [
+        {
+          "c": [
+            "us-gaap:AccountsReceivableNetCurrent"
+          ]
+        }
+      ]
+    },
+    {
+      "sheet": "BalanceSheets",
+      "row": 7,
+      "label": "Inventories",
+      "period": "instant",
+      "terms": [
+        {
+          "c": [
+            "us-gaap:InventoryNet"
+          ]
+        }
+      ]
+    },
+    {
+      "sheet": "BalanceSheets",
+      "row": 8,
+      "label": "Other current assets",
+      "period": "instant",
+      "terms": [
+        {
+          "c": [
+            "us-gaap:PrepaidExpenseAndOtherAssetsCurrent",
+            "us-gaap:OtherAssetsCurrent"
+          ]
+        }
+      ]
+    },
+    {
+      "sheet": "BalanceSheets",
+      "row": 10,
+      "label": "PP&E net (+ operating lease ROU)",
+      "period": "instant",
+      "terms": [
+        {
+          "c": [
+            "us-gaap:PropertyPlantAndEquipmentNet"
+          ]
+        },
+        {
+          "c": [
+            "us-gaap:OperatingLeaseRightOfUseAsset"
+          ],
+          "optional": true
+        }
+      ]
+    },
+    {
+      "sheet": "BalanceSheets",
+      "row": 11,
+      "label": "Goodwill",
+      "period": "instant",
+      "terms": [
+        {
+          "c": [
+            "us-gaap:Goodwill"
+          ]
+        }
+      ]
+    },
+    {
+      "sheet": "BalanceSheets",
+      "row": 12,
+      "label": "Long-term Investments",
+      "period": "instant",
+      "terms": [
+        {
+          "c": [
+            "us-gaap:EquitySecuritiesFVNINoncurrent",
+            "us-gaap:LongTermInvestments"
+          ],
+          "optional": true
+        }
+      ]
+    },
+    {
+      "sheet": "BalanceSheets",
+      "row": 13,
+      "label": "Other non-current assets",
+      "period": "instant",
+      "terms": [
+        {
+          "c": [
+            "us-gaap:IntangibleAssetsNetExcludingGoodwill"
+          ],
+          "optional": true
+        },
+        {
+          "c": [
+            "us-gaap:DeferredIncomeTaxAssetsNet"
+          ],
+          "optional": true
+        },
+        {
+          "c": [
+            "us-gaap:OtherAssetsNoncurrent"
+          ],
+          "optional": true
+        }
+      ]
+    },
+    {
+      "sheet": "BalanceSheets",
+      "row": 18,
+      "label": "Accounts payable",
+      "period": "instant",
+      "terms": [
+        {
+          "c": [
+            "us-gaap:AccountsPayableCurrent"
+          ]
+        }
+      ]
+    },
+    {
+      "sheet": "BalanceSheets",
+      "row": 19,
+      "label": "Short-term Borrowings",
+      "period": "instant",
+      "terms": [
+        {
+          "c": [
+            "us-gaap:ShortTermBorrowings",
+            "us-gaap:CommercialPaper"
+          ],
+          "optional": true
+        }
+      ]
+    },
+    {
+      "sheet": "BalanceSheets",
+      "row": 20,
+      "label": "Current Portion of LT Debt",
+      "period": "instant",
+      "terms": [
+        {
+          "c": [
+            "us-gaap:LongTermDebtCurrent",
+            "us-gaap:DebtCurrent"
+          ],
+          "optional": true
+        }
+      ]
+    },
+    {
+      "sheet": "BalanceSheets",
+      "row": 21,
+      "label": "Current Portion of Lease Obligations",
+      "period": "instant",
+      "terms": [
+        {
+          "c": [
+            "us-gaap:OperatingLeaseLiabilityCurrent"
+          ],
+          "optional": true
+        }
+      ]
+    },
+    {
+      "sheet": "BalanceSheets",
+      "row": 22,
+      "label": "Other current liabilities (accrued - lease current)",
+      "period": "instant",
+      "terms": [
+        {
+          "c": [
+            "us-gaap:AccruedLiabilitiesCurrent"
+          ]
+        }
+      ],
+      "refs": [
+        {
+          "row": 21,
+          "sign": -1
+        }
+      ]
+    },
+    {
+      "sheet": "BalanceSheets",
+      "row": 24,
+      "label": "Long-term debt",
+      "period": "instant",
+      "terms": [
+        {
+          "c": [
+            "us-gaap:LongTermDebtNoncurrent"
+          ],
+          "optional": true
+        }
+      ]
+    },
+    {
+      "sheet": "BalanceSheets",
+      "row": 25,
+      "label": "Lease liabilities non-current",
+      "period": "instant",
+      "terms": [
+        {
+          "c": [
+            "us-gaap:OperatingLeaseLiabilityNoncurrent"
+          ],
+          "optional": true
+        }
+      ]
+    },
+    {
+      "sheet": "BalanceSheets",
+      "row": 26,
+      "label": "Other non-current liabilities",
+      "period": "instant",
+      "terms": [
+        {
+          "c": [
+            "us-gaap:OtherLiabilitiesNoncurrent"
+          ],
+          "optional": true
+        }
+      ]
+    },
+    {
+      "sheet": "BalanceSheets",
+      "row": 29,
+      "label": "Common stock",
+      "period": "instant",
+      "terms": [
+        {
+          "c": [
+            "us-gaap:CommonStockValue"
+          ],
+          "optional": true
+        }
+      ]
+    },
+    {
+      "sheet": "BalanceSheets",
+      "row": 30,
+      "label": "Additional paid-in capital",
+      "period": "instant",
+      "terms": [
+        {
+          "c": [
+            "us-gaap:AdditionalPaidInCapital",
+            "us-gaap:AdditionalPaidInCapitalCommonStock"
+          ]
+        }
+      ]
+    },
+    {
+      "sheet": "BalanceSheets",
+      "row": 31,
+      "label": "Retained earnings",
+      "period": "instant",
+      "terms": [
+        {
+          "c": [
+            "us-gaap:RetainedEarningsAccumulatedDeficit"
+          ]
+        }
+      ]
+    },
+    {
+      "sheet": "BalanceSheets",
+      "row": 32,
+      "label": "Treasury stock",
+      "period": "instant",
+      "terms": [
+        {
+          "c": [
+            "us-gaap:TreasuryStockValue",
+            "us-gaap:TreasuryStockCommonValue"
+          ],
+          "sign": -1,
+          "optional": true
+        }
+      ]
+    },
+    {
+      "sheet": "BalanceSheets",
+      "row": 33,
+      "label": "Other Common Equity Adj (AOCI)",
+      "period": "instant",
+      "terms": [
+        {
+          "c": [
+            "us-gaap:AccumulatedOtherComprehensiveIncomeLossNetOfTax"
+          ],
+          "optional": true
+        }
+      ]
+    },
+    {
+      "sheet": "CashFlowStatement",
+      "row": 3,
+      "label": "Net income",
+      "period": "duration",
+      "terms": [
+        {
+          "c": [
+            "us-gaap:NetIncomeLoss",
+            "us-gaap:ProfitLoss"
+          ]
+        }
+      ]
+    },
+    {
+      "sheet": "CashFlowStatement",
+      "row": 4,
+      "label": "Depreciation and amortization",
+      "period": "duration",
+      "terms": [
+        {
+          "c": [
+            "us-gaap:DepreciationDepletionAndAmortization",
+            "us-gaap:DepreciationAmortizationAndAccretionNet"
+          ]
+        }
+      ]
+    },
+    {
+      "sheet": "CashFlowStatement",
+      "row": 5,
+      "label": "Stock-based compensation",
+      "period": "duration",
+      "terms": [
+        {
+          "c": [
+            "us-gaap:ShareBasedCompensation"
+          ]
+        }
+      ]
+    },
+    {
+      "sheet": "CashFlowStatement",
+      "row": 6,
+      "label": "Other Operating Activities",
+      "period": "duration",
+      "terms": [
+        {
+          "c": [
+            "us-gaap:DeferredIncomeTaxExpenseBenefit"
+          ],
+          "optional": true
+        },
+        {
+          "c": [
+            "us-gaap:GainLossOnInvestments"
+          ],
+          "sign": -1,
+          "optional": true
+        },
+        {
+          "c": [
+            "us-gaap:OtherNoncashIncomeExpense"
+          ],
+          "sign": -1,
+          "optional": true
+        }
+      ]
+    },
+    {
+      "sheet": "CashFlowStatement",
+      "row": 8,
+      "label": "Accounts receivable",
+      "period": "duration",
+      "terms": [
+        {
+          "c": [
+            "us-gaap:IncreaseDecreaseInAccountsReceivable"
+          ],
+          "sign": -1
+        }
+      ]
+    },
+    {
+      "sheet": "CashFlowStatement",
+      "row": 9,
+      "label": "Inventories",
+      "period": "duration",
+      "terms": [
+        {
+          "c": [
+            "us-gaap:IncreaseDecreaseInInventories"
+          ],
+          "sign": -1
+        }
+      ]
+    },
+    {
+      "sheet": "CashFlowStatement",
+      "row": 10,
+      "label": "Accounts payable",
+      "period": "duration",
+      "terms": [
+        {
+          "c": [
+            "us-gaap:IncreaseDecreaseInAccountsPayable"
+          ]
+        }
+      ]
+    },
+    {
+      "sheet": "CashFlowStatement",
+      "row": 11,
+      "label": "Change in Other Net Operating Assets",
+      "period": "duration",
+      "terms": [
+        {
+          "c": [
+            "us-gaap:IncreaseDecreaseInPrepaidDeferredExpenseAndOtherAssets"
+          ],
+          "sign": -1,
+          "optional": true
+        },
+        {
+          "c": [
+            "us-gaap:IncreaseDecreaseInAccruedLiabilitiesAndOtherOperatingLiabilities"
+          ],
+          "optional": true
+        },
+        {
+          "c": [
+            "us-gaap:IncreaseDecreaseInOtherNoncurrentLiabilities"
+          ],
+          "optional": true
+        }
+      ]
+    },
+    {
+      "sheet": "CashFlowStatement",
+      "row": 15,
+      "label": "Capital Expenditures",
+      "period": "duration",
+      "terms": [
+        {
+          "c": [
+            "us-gaap:PaymentsToAcquireProductiveAssets",
+            "us-gaap:PaymentsToAcquirePropertyPlantAndEquipment"
+          ],
+          "sign": -1
+        }
+      ]
+    },
+    {
+      "sheet": "CashFlowStatement",
+      "row": 16,
+      "label": "Cash Acquisitions",
+      "period": "duration",
+      "terms": [
+        {
+          "c": [
+            "us-gaap:PaymentsToAcquireBusinessesNetOfCashAcquired"
+          ],
+          "sign": -1,
+          "optional": true
+        },
+        {
+          "c": [
+            "us-gaap:PaymentsToAcquireBusinessTwoNetOfCashAcquired"
+          ],
+          "sign": -1,
+          "optional": true
+        }
+      ]
+    },
+    {
+      "sheet": "CashFlowStatement",
+      "row": 17,
+      "label": "Other Investing Activities",
+      "period": "duration",
+      "terms": [
+        {
+          "c": [
+            "us-gaap:ProceedsFromMaturitiesPrepaymentsAndCallsOfAvailableForSaleSecurities"
+          ],
+          "optional": true
+        },
+        {
+          "c": [
+            "us-gaap:ProceedsFromSaleOfAvailableForSaleSecuritiesDebt"
+          ],
+          "optional": true
+        },
+        {
+          "c": [
+            "us-gaap:ProceedsFromSaleOfEquitySecuritiesFvNi"
+          ],
+          "optional": true
+        },
+        {
+          "c": [
+            "us-gaap:PaymentsToAcquireAvailableForSaleSecuritiesDebt"
+          ],
+          "sign": -1,
+          "optional": true
+        },
+        {
+          "c": [
+            "us-gaap:PaymentsToAcquireEquitySecuritiesFvNi"
+          ],
+          "sign": -1,
+          "optional": true
+        },
+        {
+          "c": [
+            "us-gaap:PaymentsForProceedsFromOtherInvestingActivities"
+          ],
+          "sign": -1,
+          "optional": true
+        }
+      ]
+    },
+    {
+      "sheet": "CashFlowStatement",
+      "row": 21,
+      "label": "Dividends paid",
+      "period": "duration",
+      "terms": [
+        {
+          "c": [
+            "us-gaap:PaymentsOfDividends",
+            "us-gaap:PaymentsOfDividendsCommonStock"
+          ],
+          "sign": -1,
+          "optional": true
+        }
+      ]
+    },
+    {
+      "sheet": "CashFlowStatement",
+      "row": 22,
+      "label": "Long-Term Debt Issued",
+      "period": "duration",
+      "terms": [
+        {
+          "c": [
+            "us-gaap:ProceedsFromIssuanceOfLongTermDebt",
+            "us-gaap:ProceedsFromIssuanceOfDebt"
+          ],
+          "optional": true
+        }
+      ]
+    },
+    {
+      "sheet": "CashFlowStatement",
+      "row": 23,
+      "label": "Long-Term Debt Repaid",
+      "period": "duration",
+      "terms": [
+        {
+          "c": [
+            "us-gaap:RepaymentsOfDebt",
+            "us-gaap:RepaymentsOfLongTermDebt"
+          ],
+          "sign": -1,
+          "optional": true
+        }
+      ]
+    },
+    {
+      "sheet": "CashFlowStatement",
+      "row": 24,
+      "label": "Repurchase of Common Stock (incl. tax withholding)",
+      "period": "duration",
+      "terms": [
+        {
+          "c": [
+            "us-gaap:PaymentsForRepurchaseOfCommonStock"
+          ],
+          "sign": -1,
+          "optional": true
+        },
+        {
+          "c": [
+            "us-gaap:PaymentsRelatedToTaxWithholdingForShareBasedCompensation"
+          ],
+          "sign": -1,
+          "optional": true
+        }
+      ]
+    },
+    {
+      "sheet": "CashFlowStatement",
+      "row": 25,
+      "label": "Other Financing Activities",
+      "period": "duration",
+      "terms": [
+        {
+          "c": [
+            "us-gaap:ProceedsFromStockPlans",
+            "us-gaap:ProceedsFromIssuanceOfCommonStock"
+          ],
+          "optional": true
+        },
+        {
+          "c": [
+            "nvda:PaymentsForFinancedPropertyPlantAndEquipmentAndIntangibleAssetsFinancingActivities"
+          ],
+          "sign": -1,
+          "optional": true
+        },
+        {
+          "c": [
+            "us-gaap:ProceedsFromPaymentsForOtherFinancingActivities"
+          ],
+          "optional": true
+        }
+      ]
+    },
+    {
+      "sheet": "CashFlowStatement",
+      "row": 28,
+      "label": "Cash at beginning of period",
+      "formula": "={prev}30",
+      "opening": [
+        "us-gaap:CashCashEquivalentsRestrictedCashAndRestrictedCashEquivalents",
+        "us-gaap:CashAndCashEquivalentsAtCarryingValue"
+      ]
+    },
+    {
+      "sheet": "CashFlowStatement",
+      "row": 29,
+      "label": "Change in cash and cash equivalents",
+      "period": "duration",
+      "terms": [
+        {
+          "c": [
+            "us-gaap:CashCashEquivalentsRestrictedCashAndRestrictedCashEquivalentsPeriodIncreaseDecreaseIncludingExchangeRateEffect",
+            "us-gaap:CashAndCashEquivalentsPeriodIncreaseDecrease"
+          ]
+        }
+      ]
+    }
   ],
   "checks": [
-    { "label": "Revenue (segments)", "sheet": "IncomeStatement", "rows": ["+3", "+4"], "concept": "us-gaap:Revenues", "period": "duration" },
-    { "label": "Gross profit", "sheet": "IncomeStatement", "rows": ["+3", "+4", "-6"], "concept": "us-gaap:GrossProfit", "period": "duration" },
-    { "label": "Operating income", "sheet": "IncomeStatement", "rows": ["+3", "+4", "-6", "-9", "-10"], "concept": "us-gaap:OperatingIncomeLoss", "period": "duration" },
-    { "label": "Pre-tax income", "sheet": "IncomeStatement", "rows": ["+3", "+4", "-6", "-9", "-10", "+12"], "concept": "us-gaap:IncomeLossFromContinuingOperationsBeforeIncomeTaxesExtraordinaryItemsNoncontrollingInterest", "period": "duration" },
-    { "label": "Net income", "sheet": "IncomeStatement", "rows": ["+3", "+4", "-6", "-9", "-10", "+12", "-14"], "concept": "us-gaap:NetIncomeLoss", "period": "duration" },
-    { "label": "Total current assets", "sheet": "BalanceSheets", "rows": ["+3", "+4", "+6", "+7", "+8"], "concept": "us-gaap:AssetsCurrent", "period": "instant" },
-    { "label": "Total assets", "sheet": "BalanceSheets", "rows": ["+3", "+4", "+6", "+7", "+8", "+10", "+11", "+12", "+13"], "concept": "us-gaap:Assets", "period": "instant" },
-    { "label": "Total current liabilities", "sheet": "BalanceSheets", "rows": ["+18", "+19", "+20", "+21", "+22"], "concept": "us-gaap:LiabilitiesCurrent", "period": "instant" },
-    { "label": "Total liabilities", "sheet": "BalanceSheets", "rows": ["+18", "+19", "+20", "+21", "+22", "+24", "+25", "+26"], "concept": "us-gaap:Liabilities", "period": "instant" },
-    { "label": "Total equity", "sheet": "BalanceSheets", "rows": ["+29", "+30", "+31", "+32", "+33"], "concept": "us-gaap:StockholdersEquity", "period": "instant" },
-    { "label": "Liabilities + equity", "sheet": "BalanceSheets", "rows": ["+18", "+19", "+20", "+21", "+22", "+24", "+25", "+26", "+29", "+30", "+31", "+32", "+33"], "concept": "us-gaap:LiabilitiesAndStockholdersEquity", "period": "instant" },
-    { "label": "Cash from operations", "sheet": "CashFlowStatement", "rows": ["+3", "+4", "+5", "+6", "+8", "+9", "+10", "+11"], "concept": "us-gaap:NetCashProvidedByUsedInOperatingActivities", "period": "duration" },
-    { "label": "Cash from investing", "sheet": "CashFlowStatement", "rows": ["+15", "+16", "+17"], "concept": "us-gaap:NetCashProvidedByUsedInInvestingActivities", "period": "duration" },
-    { "label": "Cash from financing", "sheet": "CashFlowStatement", "rows": ["+21", "+22", "+23", "+24", "+25"], "concept": "us-gaap:NetCashProvidedByUsedInFinancingActivities", "period": "duration" }
+    {
+      "label": "Revenue (segments)",
+      "sheet": "IncomeStatement",
+      "rows": [
+        "+3",
+        "+4"
+      ],
+      "concept": "us-gaap:Revenues",
+      "period": "duration",
+      "alt": [
+        "us-gaap:RevenueFromContractWithCustomerExcludingAssessedTax",
+        "us-gaap:SalesRevenueNet"
+      ],
+      "plugRow": 3
+    },
+    {
+      "label": "Gross profit",
+      "sheet": "IncomeStatement",
+      "rows": [
+        "+3",
+        "+4",
+        "-6"
+      ],
+      "concept": "us-gaap:GrossProfit",
+      "period": "duration",
+      "plugRow": 6
+    },
+    {
+      "label": "Operating income",
+      "sheet": "IncomeStatement",
+      "rows": [
+        "+3",
+        "+4",
+        "-6",
+        "-9",
+        "-10"
+      ],
+      "concept": "us-gaap:OperatingIncomeLoss",
+      "period": "duration",
+      "plugRow": 10
+    },
+    {
+      "label": "Pre-tax income",
+      "sheet": "IncomeStatement",
+      "rows": [
+        "+3",
+        "+4",
+        "-6",
+        "-9",
+        "-10",
+        "+12"
+      ],
+      "concept": "us-gaap:IncomeLossFromContinuingOperationsBeforeIncomeTaxesExtraordinaryItemsNoncontrollingInterest",
+      "period": "duration",
+      "alt": [
+        "us-gaap:IncomeLossFromContinuingOperationsBeforeIncomeTaxesMinorityInterestAndIncomeLossFromEquityMethodInvestments"
+      ],
+      "plugRow": 12
+    },
+    {
+      "label": "Net income",
+      "sheet": "IncomeStatement",
+      "rows": [
+        "+3",
+        "+4",
+        "-6",
+        "-9",
+        "-10",
+        "+12",
+        "-14"
+      ],
+      "concept": "us-gaap:NetIncomeLoss",
+      "period": "duration",
+      "alt": [
+        "us-gaap:ProfitLoss",
+        "us-gaap:NetIncomeLossAvailableToCommonStockholdersBasic"
+      ],
+      "plugRow": 14
+    },
+    {
+      "label": "Total current assets",
+      "sheet": "BalanceSheets",
+      "rows": [
+        "+3",
+        "+4",
+        "+6",
+        "+7",
+        "+8"
+      ],
+      "concept": "us-gaap:AssetsCurrent",
+      "period": "instant",
+      "plugRow": 8
+    },
+    {
+      "label": "Total assets",
+      "sheet": "BalanceSheets",
+      "rows": [
+        "+3",
+        "+4",
+        "+6",
+        "+7",
+        "+8",
+        "+10",
+        "+11",
+        "+12",
+        "+13"
+      ],
+      "concept": "us-gaap:Assets",
+      "period": "instant",
+      "plugRow": 13
+    },
+    {
+      "label": "Total current liabilities",
+      "sheet": "BalanceSheets",
+      "rows": [
+        "+18",
+        "+19",
+        "+20",
+        "+21",
+        "+22"
+      ],
+      "concept": "us-gaap:LiabilitiesCurrent",
+      "period": "instant",
+      "plugRow": 22
+    },
+    {
+      "label": "Total liabilities",
+      "sheet": "BalanceSheets",
+      "rows": [
+        "+18",
+        "+19",
+        "+20",
+        "+21",
+        "+22",
+        "+24",
+        "+25",
+        "+26"
+      ],
+      "concept": "us-gaap:Liabilities",
+      "period": "instant",
+      "plugRow": 26
+    },
+    {
+      "label": "Total equity",
+      "sheet": "BalanceSheets",
+      "rows": [
+        "+29",
+        "+30",
+        "+31",
+        "+32",
+        "+33"
+      ],
+      "concept": "us-gaap:StockholdersEquity",
+      "period": "instant",
+      "alt": [
+        "us-gaap:StockholdersEquityIncludingPortionAttributableToNoncontrollingInterest"
+      ],
+      "plugRow": 33
+    },
+    {
+      "label": "Liabilities + equity",
+      "sheet": "BalanceSheets",
+      "rows": [
+        "+18",
+        "+19",
+        "+20",
+        "+21",
+        "+22",
+        "+24",
+        "+25",
+        "+26",
+        "+29",
+        "+30",
+        "+31",
+        "+32",
+        "+33"
+      ],
+      "concept": "us-gaap:LiabilitiesAndStockholdersEquity",
+      "period": "instant",
+      "plugRow": 26
+    },
+    {
+      "label": "Cash from operations",
+      "sheet": "CashFlowStatement",
+      "rows": [
+        "+3",
+        "+4",
+        "+5",
+        "+6",
+        "+8",
+        "+9",
+        "+10",
+        "+11"
+      ],
+      "concept": "us-gaap:NetCashProvidedByUsedInOperatingActivities",
+      "period": "duration",
+      "alt": [
+        "us-gaap:NetCashProvidedByUsedInOperatingActivitiesContinuingOperations"
+      ],
+      "plugRow": 11
+    },
+    {
+      "label": "Cash from investing",
+      "sheet": "CashFlowStatement",
+      "rows": [
+        "+15",
+        "+16",
+        "+17"
+      ],
+      "concept": "us-gaap:NetCashProvidedByUsedInInvestingActivities",
+      "period": "duration",
+      "alt": [
+        "us-gaap:NetCashProvidedByUsedInInvestingActivitiesContinuingOperations"
+      ],
+      "plugRow": 17
+    },
+    {
+      "label": "Cash from financing",
+      "sheet": "CashFlowStatement",
+      "rows": [
+        "+21",
+        "+22",
+        "+23",
+        "+24",
+        "+25"
+      ],
+      "concept": "us-gaap:NetCashProvidedByUsedInFinancingActivities",
+      "period": "duration",
+      "alt": [
+        "us-gaap:NetCashProvidedByUsedInFinancingActivitiesContinuingOperations"
+      ],
+      "plugRow": 25
+    }
   ]
 }

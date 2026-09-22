@@ -49,6 +49,41 @@ public struct FactStore: Sendable {
         return (preferred + inline, f.filed)
     }
 
+    /// Instant value at the end of the fiscal year before `period` (≈ 1 year earlier).
+    public func openingValue(_ concept: String, period: FiscalPeriod, unit: String = "USD") -> Fact? {
+        (byConcept[concept] ?? []).filter { f in
+            f.isInstant && f.unit == unit && f.dimensions.filter { !ignoredAxes.contains($0.key) }.isEmpty &&
+                (DateOnly.days(from: f.end, to: period.endDate).map { (350...380).contains($0) } ?? false)
+        }.max { $0.filed < $1.filed }
+    }
+
+    /// Fiscal years available in the facts, newest first, up to `count` years back from `latest`.
+    /// Fiscal year numbers follow from the distance to `latest` (52/53-week years stay aligned).
+    public func annualPeriods(latest: FiscalPeriod, count: Int) -> [FiscalPeriod] {
+        let concepts = ["us-gaap:NetIncomeLoss", "us-gaap:ProfitLoss", "us-gaap:Revenues",
+                        "us-gaap:RevenueFromContractWithCustomerExcludingAssessedTax",
+                        "us-gaap:NetCashProvidedByUsedInOperatingActivities"]
+        var ends = Set<String>()
+        for c in concepts {
+            for f in byConcept[c] ?? [] where f.dimensions.isEmpty && f.end <= latest.endDate {
+                if let d = f.durationDays, (350...380).contains(d) { ends.insert(f.end) }
+            }
+        }
+        var byYear: [Int: String] = [:]
+        for e in ends {
+            guard let days = DateOnly.days(from: e, to: latest.endDate) else { continue }
+            let back = Int((Double(days) / 365.25).rounded())
+            guard back < count else { continue }
+            let fy = latest.fiscalYear - back
+            // Two end dates for the same year (e.g. restated calendar) → keep the later one.
+            if let existing = byYear[fy], existing >= e { continue }
+            byYear[fy] = e
+        }
+        return byYear.keys.sorted(by: >).map { fy in
+            FiscalPeriod(fiscalYear: fy, endDate: byYear[fy]!, accession: fy == latest.fiscalYear ? latest.accession : nil)
+        }
+    }
+
     /// Latest annual period available for a concept (used to auto-detect the fiscal year end).
     public func latestAnnualEnd(of concept: String = "us-gaap:NetIncomeLoss") -> String? {
         byConcept[concept]?

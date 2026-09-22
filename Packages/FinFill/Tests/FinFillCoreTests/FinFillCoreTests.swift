@@ -134,3 +134,196 @@ final class FinFillCoreTests: XCTestCase {
         XCTAssertEqual(HTMLText.decodeEntities("A&#160;&amp;&#8217;B&nbsp;"), "A\u{00A0}&\u{2019}B\u{00A0}")
     }
 }
+
+final class ReconcileAndColumnTests: XCTestCase {
+    let f = FinFillCoreTests.filing
+
+    func testNVDANeedsNoPlugs() {
+        let checks = Validator.run(FinFillCoreTests.mapping, rows: MappingResolver.resolve(FinFillCoreTests.mapping, facts: f.facts, period: f.period),
+                                   facts: f.facts, period: f.period)
+        XCTAssertTrue(checks.allSatisfy { $0.status == .passed }, checks.map { "\($0.label) \($0.status)" }.joined(separator: "; "))
+    }
+
+    /// Another company: segment members of the template don't exist and SG&A is tagged differently.
+    func testUnknownSegmentsAndMissingLineArePlugged() throws {
+        var m = FinFillCoreTests.mapping
+        for i in m.rows.indices {
+            if m.rows[i].sheet == "IncomeStatement" && (m.rows[i].row == 3 || m.rows[i].row == 4) {
+                m.rows[i].terms![0].dims = ["us-gaap:StatementBusinessSegmentsAxis": "amd:DataCenterSegmentMember"]
+            }
+            if m.rows[i].sheet == "IncomeStatement" && m.rows[i].row == 10 {
+                m.rows[i].terms = [.init(c: ["us-gaap:DoesNotExist"], sign: nil, dims: nil, optional: nil)]
+            }
+        }
+        var rows = MappingResolver.resolve(m, facts: f.facts, period: f.period)
+        let checks = Validator.reconcile(m, rows: &rows, facts: f.facts, period: f.period)
+        let byID = Dictionary(uniqueKeysWithValues: rows.map { ($0.id, $0) })
+
+        XCTAssertEqual(checks[0].status, .plugged(row: 3, amount: 215938))
+        XCTAssertEqual(byID["IncomeStatement!3"]?.value, 215938)
+        XCTAssertEqual(byID["IncomeStatement!4"]?.value, 0)
+        XCTAssertEqual(checks[2].status, .plugged(row: 10, amount: 4579))   // operating income → SG&A row
+        XCTAssertEqual(byID["IncomeStatement!10"]?.value, 4579)
+        XCTAssertTrue(checks.allSatisfy(\.passed))
+        XCTAssertEqual(MappingResolver.content(for: byID["IncomeStatement!3"]!, column: "L", previousColumn: "K"), .number(215938))
+    }
+
+    func testNotReportedTotalDoesNotBlock() {
+        var m = FinFillCoreTests.mapping
+        m.checks[8].concept = "us-gaap:NotTagged"   // Total liabilities
+        m.checks[8].alt = nil
+        let checks = Validator.run(m, rows: MappingResolver.resolve(m, facts: f.facts, period: f.period), facts: f.facts, period: f.period)
+        XCTAssertEqual(checks[8].status, .notReported)
+        XCTAssertTrue(checks.allSatisfy(\.passed))
+    }
+
+    func testReferencesCells() {
+        XCTAssertFalse(SheetPlanner.referencesCells("=6283+1793"))
+        XCTAssertFalse(SheetPlanner.referencesCells("=(-2489-238-278)"))
+        XCTAssertTrue(SheetPlanner.referencesCells("=N3+N4"))
+        XCTAssertTrue(SheetPlanner.referencesCells("=SUM(G5:N5)"))
+        XCTAssertTrue(SheetPlanner.referencesCells("=IncomeStatement!J5"))
+        XCTAssertTrue(SheetPlanner.referencesCells("=$N$3*2"))
+        XCTAssertFalse(SheetPlanner.referencesCells("=IFERROR(__xludf.DUMMYFUNCTION(\"GOOGLEFINANCE(C4)\"),227.5)"))
+        XCTAssertTrue(SheetPlanner.hasTypedNumbers("=(1112+6081+4500)-N12"))
+        XCTAssertTrue(SheetPlanner.hasTypedNumbers("=6682-N21"))
+        XCTAssertFalse(SheetPlanner.hasTypedNumbers("=SUM(N5:N8)"))
+        XCTAssertFalse(SheetPlanner.hasTypedNumbers("=N2+1"))
+        XCTAssertFalse(SheetPlanner.hasTypedNumbers("=IF(OR(ISBLANK(O14), O13 = 0), \"0%\", O14/O13)"))
+    }
+
+    /// Sheet ends with 2022 in column K (like the AMD workbook on the screenshot); FY2023 is wanted.
+    func testColumnCreationCopiesFormulasAndClearsInputs() throws {
+        let header: [Any] = ["x", "Income Statement", "", "", "", "", 2018.0, 2019.0, 2020.0, 2021.0, 2022.0]
+        var source: [Any?] = Array(repeating: nil, count: 26)
+        source[1] = "=J2+1"            // row 2 header formula
+        source[2] = 15868.0            // 3 mapped
+        source[3] = 11046.0            // 4 mapped
+        source[4] = "=K3+K4"           // 5 total → keep
+        source[5] = 9439.0             // 6 mapped
+        source[6] = "=K6"              // 7 keep
+        source[7] = "=K5-K7"           // 8 keep
+        source[9] = "=2166+0"          // 10 mapped (constant formula)
+        source[15] = "=K13-K14"        // 16 keep
+        source[18] = 2.0               // 19 mapped
+        source[24] = "note"            // 25 typed text, unmapped → clear
+        source[25] = "=12*3"           // 26 constant formula, unmapped → clear
+        let mapped = Set(FinFillCoreTests.mapping.rows.filter { $0.sheet == "IncomeStatement" }.map(\.row))
+        let c = try SheetPlanner.columnCreation(sheet: "IncomeStatement", sheetId: 42, header: header, year: 2023,
+                                                headerRow: 2, sourceColumn: source, mappedRows: mapped)
+        XCTAssertEqual(c.sourceColumn, "K")
+        XCTAssertEqual(c.column, "L")
+        XCTAssertFalse(c.setHeader)                         // =K2+1 after the copy gives 2023
+        XCTAssertEqual(c.clearRows, [3, 4, 6, 9, 10, 12, 14, 19, 20, 22, 23, 25, 26])
+        let req = c.requests()
+        let insert = (req[0]["insertDimension"] as! [String: Any])["range"] as! [String: Any]
+        XCTAssertEqual(insert["startIndex"] as? Int, 11)
+        XCTAssertEqual(insert["sheetId"] as? Int, 42)
+        let copy = req[1]["copyPaste"] as! [String: Any]
+        XCTAssertEqual((copy["source"] as! [String: Any])["startColumnIndex"] as? Int, 10)
+        XCTAssertEqual(copy["pasteType"] as? String, "PASTE_NORMAL")
+
+        // Typed-in header year → written explicitly.
+        source[1] = 2022.0
+        XCTAssertTrue(try SheetPlanner.columnCreation(sheet: "IncomeStatement", sheetId: 42, header: header, year: 2023,
+                                                      headerRow: 2, sourceColumn: source, mappedRows: mapped).setHeader)
+        // A gap is refused with a readable message.
+        XCTAssertThrowsError(try SheetPlanner.columnCreation(sheet: "IncomeStatement", sheetId: 42, header: header, year: 2025,
+                                                             headerRow: 2, sourceColumn: source, mappedRows: mapped)) { e in
+            XCTAssertTrue(e.localizedDescription.contains("2023, 2024"), e.localizedDescription)
+        }
+    }
+
+    func testPlanForNewColumnWritesEverything() {
+        var rows = MappingResolver.resolve(FinFillCoreTests.mapping, facts: f.facts, period: f.period)
+        Validator.reconcile(FinFillCoreTests.mapping, rows: &rows, facts: f.facts, period: f.period)
+        let plan = SheetPlanner.plan(rows: rows, columns: ["IncomeStatement": 11, "BalanceSheets": 11, "CashFlowStatement": 11],
+                                     existing: [:], overwrite: false)
+        XCTAssertTrue(plan.allSatisfy { $0.action == .write })
+        XCTAssertEqual(plan.first { $0.id == "'CashFlowStatement'!L28" }?.content, .formula("=K30"))
+        XCTAssertEqual(plan.first { $0.id == "'BalanceSheets'!L22" }?.content, .formula("=21352-L21"))
+    }
+
+    func testDriveListParsing() {
+        let json = """
+        {"files":[{"id":"1abc","name":"NVDA Valuation - 5y","modifiedTime":"2026-09-20T18:01:02.123Z","owners":[{"displayName":"Anriel"}]},
+                  {"id":"2def","name":"AMD DCF"}]}
+        """
+        let files = GoogleDriveClient.parse(Data(json.utf8))
+        XCTAssertEqual(files.map(\.name), ["NVDA Valuation - 5y", "AMD DCF"])
+        XCTAssertEqual(files[0].owner, "Anriel")
+        XCTAssertNotNil(files[0].modified)
+        XCTAssertNil(files[1].modified)
+    }
+}
+
+final class TemplateTests: XCTestCase {
+    let f = FinFillCoreTests.filing
+
+    func testUniversalTemplateLoadsAndIsEmpty() throws {
+        let t = try SpreadsheetTemplate.bundledUniversal()
+        XCTAssertEqual(t.sheets.map(\.title), ["DCF", "WACC", "IncomeStatement", "BalanceSheets", "CashFlowStatement"])
+        XCTAssertEqual(t.yearColumns.first, 6)
+        XCTAssertEqual(t.yearColumns.count, 9)
+        // No NVIDIA numbers left in the year columns of the statements, only totals / ratios.
+        for s in t.sheets where t.yearColumns.sheets.contains(s.title) {
+            for c in s.cells {
+                guard let (r, col) = A1.parse(c.a), (6...14).contains(col), r >= 2 else { continue }
+                XCTAssertNil(c.n, "\(s.title)!\(c.a) = \(c.n!)")
+                if let fm = c.f { XCTAssertFalse(SheetPlanner.hasTypedNumbers(fm), "\(s.title)!\(c.a) \(fm)") }
+            }
+        }
+        let dcf = t.sheets.first { $0.title == "DCF" }!
+        XCTAssertEqual(dcf.cells.first { $0.a == "C4" }?.v, "{{TICKER}}")
+        XCTAssertEqual(dcf.cells.first { $0.a == "D21" }?.f, "=MAX(IncomeStatement!$G$2:$Z$2)-4")
+        XCTAssertEqual(dcf.cells.first { $0.a == "H22" }?.f, "=INDEX(IncomeStatement!$G$5:$Z$5,MATCH(H$21,IncomeStatement!$G$2:$Z$2,0))")
+        XCTAssertEqual(dcf.cells.first { $0.a == "H5" }?.f, "=GOOGLEFINANCE(C4)")
+    }
+
+    func testRequestsSubstitutePlaceholdersAndKeepFormats() throws {
+        let t = try SpreadsheetTemplate.bundledUniversal()
+        let body = TemplateRequests.createBody(t, title: "AMD Valuation")
+        XCTAssertEqual((body["properties"] as! [String: Any])["locale"] as? String, "en_US")
+        let ids = Dictionary(uniqueKeysWithValues: t.sheets.enumerated().map { ($1.title, $0 + 100) })
+        let req = TemplateRequests.contentRequests(t, sheetIds: ids,
+                                                   values: ["TICKER": "AMD", "FY_FIRST": "2017", "TODAY": "DATE(2026,9,21)", "FYEND": "DATE(2025,12,27)"])
+        let updates = req.compactMap { $0["updateCells"] as? [String: Any] }
+        XCTAssertEqual(updates.count, 5)
+        XCTAssertGreaterThan(req.filter { $0["mergeCells"] != nil }.count, 10)
+
+        func cell(_ sheet: String, _ a: String) -> [String: Any] {
+            let u = updates.first { (($0["start"] as! [String: Any])["sheetId"] as! Int) == ids[sheet]! }!
+            let (r, c) = A1.parse(a)!
+            return ((u["rows"] as! [[String: Any]])[r]["values"] as! [[String: Any]])[c]
+        }
+        XCTAssertEqual((cell("DCF", "C4")["userEnteredValue"] as? [String: Any])?["stringValue"] as? String, "AMD")
+        XCTAssertEqual((cell("DCF", "C6")["userEnteredValue"] as? [String: Any])?["formulaValue"] as? String, "=DATE(2025,12,27)")
+        XCTAssertEqual((cell("IncomeStatement", "G2")["userEnteredValue"] as? [String: Any])?["numberValue"] as? Double, 2017)
+        XCTAssertEqual((cell("IncomeStatement", "H2")["userEnteredValue"] as? [String: Any])?["formulaValue"] as? String, "=G2+1")
+        let fmt = cell("IncomeStatement", "O5")["userEnteredFormat"] as? [String: Any]
+        XCTAssertEqual((fmt?["numberFormat"] as? [String: Any])?["pattern"] as? String, "#,##0;(#,##0)")
+    }
+
+    func testAnnualPeriodsAndMultiYearPlan() throws {
+        let periods = f.facts.annualPeriods(latest: f.period, count: 9)
+        XCTAssertEqual(periods.map(\.fiscalYear), [2026, 2025, 2024])
+        XCTAssertEqual(periods.map(\.endDate), ["2026-01-25", "2025-01-26", "2024-01-28"])
+
+        let plan = WorkbookFiller.plan(mapping: try TemplateMapping.bundledUniversal(), facts: f.facts, periods: periods,
+                                       firstYear: 2018, firstColumn: 6, columnCount: 9)
+        XCTAssertEqual(plan.years.map(\.column), ["M", "N", "O"])
+        XCTAssertTrue(plan.years.allSatisfy { $0.failed == 0 && $0.plugged == 0 })
+        let byRange = Dictionary(plan.writes.map { ($0.range, $0.content) }, uniquingKeysWith: { a, _ in a })
+        XCTAssertEqual(byRange["'IncomeStatement'!O3"], .number(215938))     // total revenue in row 3
+        XCTAssertEqual(byRange["'IncomeStatement'!M3"], .number(60922))
+        XCTAssertEqual(byRange["'CashFlowStatement'!O28"], .formula("=N30"))
+        XCTAssertNil(byRange["'BalanceSheets'!M3"])                           // FY2024 balance sheet not in this 10-K
+        XCTAssertNotNil(byRange["'CashFlowStatement'!M3"])
+
+        // Newest year as the first column → opening cash instead of "={prev}30".
+        let first = WorkbookFiller.plan(mapping: try TemplateMapping.bundledUniversal(), facts: f.facts, periods: periods,
+                                        firstYear: 2026, firstColumn: 6, columnCount: 1)
+        let fr = Dictionary(first.writes.map { ($0.range, $0.content) }, uniquingKeysWith: { a, _ in a })
+        XCTAssertEqual(fr["'CashFlowStatement'!G28"], .number(8589))
+    }
+}

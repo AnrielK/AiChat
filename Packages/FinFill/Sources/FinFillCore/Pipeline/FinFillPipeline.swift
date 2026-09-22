@@ -82,6 +82,8 @@ public struct FinFillPipeline: Sendable {
         public let checks: [CheckResult]
         public let backtest: [ColumnDifference]
         public let plan: [PlannedWrite]
+        /// Year columns that are missing and get created on write.
+        public let newColumns: [ColumnCreation]
         public let written: Int
         public let summary: Summarizer.Result?
         public var allChecksPassed: Bool { checks.allSatisfy(\.passed) }
@@ -138,18 +140,30 @@ public struct FinFillPipeline: Sendable {
         let mapping = config.mapping
 
         // 1) Map + validate
-        let rows = MappingResolver.resolve(mapping, facts: filing.facts, period: filing.period)
-        for r in rows where !r.isComplete { log(.log("⚠︎ \(r.spec.sheet)!\(r.spec.row) \(r.spec.label): missing \(r.missing.joined(separator: ", "))")) }
-        let checks = Validator.run(mapping, rows: rows, facts: filing.facts, period: filing.period)
+        var rows = MappingResolver.resolve(mapping, facts: filing.facts, period: filing.period)
+        for r in rows where !r.isComplete { log(.log("⚠︎ \(r.spec.sheet)!\(r.spec.row) \(r.spec.label): chybí \(r.missing.joined(separator: ", "))")) }
+        let checks = Validator.reconcile(mapping, rows: &rows, facts: filing.facts, period: filing.period)
         for c in checks {
-            log(.log("\(c.passed ? "✓" : "✗") \(c.label): \(NumberFormat.plain(c.computed)) vs reported \(c.reported.map(NumberFormat.plain) ?? "n/a")"))
+            let mark: String
+            switch c.status {
+            case .passed: mark = "✓"
+            case let .plugged(row, amount): mark = "± ř.\(row) \(NumberFormat.plain(amount))"
+            case .notReported: mark = "–"
+            case .incomplete: mark = "… chybí data"
+            case .failed: mark = "✗"
+            }
+            log(.log("\(mark) \(c.label): \(NumberFormat.plain(c.computed)) vs vykázáno \(c.reported.map(NumberFormat.plain) ?? "n/a")"))
         }
 
         // 2) Plan against the sheet
         let sheets = GoogleSheetsClient(spreadsheetID: GoogleSheetsClient.spreadsheetID(from: config.spreadsheet), tokens: tokens)
-        let plan = try await SheetPlanner.plan(mapping: mapping, rows: rows, period: filing.period,
-                                               sheets: sheets, overwrite: config.overwrite)
-        log(.log("Plan: \(plan.filter { $0.action == .write }.count) cells to write, \(plan.filter { $0.action == .skipNotEmpty }.count) skipped (not empty)"))
+        let sheetPlan = try await SheetPlanner.plan(mapping: mapping, rows: rows, period: filing.period,
+                                                    sheets: sheets, overwrite: config.overwrite)
+        let plan = sheetPlan.writes
+        for c in sheetPlan.newColumns {
+            log(.log("\(c.sheet): sloupec \(c.column) pro \(c.year) se vytvoří kopií \(c.sourceColumn) (vzorce + formát)"))
+        }
+        log(.log("Plán: \(plan.filter { $0.action == .write }.count) buněk k zápisu, \(plan.filter { $0.action == .skipNotEmpty }.count) přeskočeno (neprázdné)"))
 
         // 3) Backtest prior year against what is already in the sheet
         var backtest: [ColumnDifference] = []
@@ -162,33 +176,20 @@ public struct FinFillPipeline: Sendable {
         var written = 0
         if !config.dryRun {
             guard checks.allSatisfy(\.passed) || config.writeEvenIfChecksFail else { throw PipelineError.checksFailed(checks) }
-            written = try await SheetPlanner.execute(plan, sheets: sheets)
-            log(.log("Written \(written) cells"))
+            written = try await SheetPlanner.execute(sheetPlan, sheets: sheets)
+            log(.log("Zapsáno \(written) buněk"))
         }
 
         // 5) Summary
-        var summary: Summarizer.Result?
-        if let engine, let html = filing.filingHTML {
-            let segments = mapping.rows.compactMap { r -> (String, [String: String])? in
-                guard let d = r.terms?.first?.dims, !d.isEmpty else { return nil }
-                return (r.label, d)
-            }
-            let kf = KeyFigures.compute(facts: filing.facts, period: filing.period, prior: filing.prior,
-                                        segments: segments.map { (name: $0.0, dims: $0.1) })
-            let summarizer = Summarizer(engine: engine, options: config.summaryOptions)
-            let result = try await summarizer.summarize(filingHTML: html, company: filing.company, keyFigures: kf) { p in log(.summary(p)) }
-            summary = result
-            if !config.dryRun, let prefix = config.summarySheetPrefix {
-                try await writeSummary(result, title: "\(prefix)\(filing.period.fiscalYear)", company: filing.company, sheets: sheets)
-                log(.log("Summary written to sheet \"\(prefix)\(filing.period.fiscalYear)\""))
-            }
-        }
-        return Report(filing: filing, rows: rows, checks: checks, backtest: backtest, plan: plan, written: written, summary: summary)
+        let summary = try await summarize(filing: filing, sheets: sheets, write: !config.dryRun, log: log)
+        return Report(filing: filing, rows: rows, checks: checks, backtest: backtest, plan: plan,
+                      newColumns: sheetPlan.newColumns, written: written, summary: summary)
     }
 
     func backtest(prior: FiscalPeriod, filing: PreparedFiling, sheets: GoogleSheetsClient) async throws -> [ColumnDifference] {
         let mapping = config.mapping
-        let rows = MappingResolver.resolve(mapping, facts: filing.facts, period: prior)
+        var rows = MappingResolver.resolve(mapping, facts: filing.facts, period: prior)
+        Validator.reconcile(mapping, rows: &rows, facts: filing.facts, period: prior)
         let names = mapping.sheets
         let headers = try await sheets.batchGet(names.map { "\(A1.quote($0))!A\(mapping.headerRow):AZ\(mapping.headerRow)" }, render: .unformatted)
         var ranges: [String] = [], used: [String] = []
@@ -208,6 +209,24 @@ public struct FinFillPipeline: Sendable {
             }
         }
         return Validator.compare(rows: rows.filter { used.contains($0.spec.sheet) }, existing: existing)
+    }
+
+    /// Summary by the engine (if any); written to the sheet "Summary FY<year>" when `write`.
+    func summarize(filing: PreparedFiling, sheets: GoogleSheetsClient, write: Bool,
+                   log: @escaping @Sendable (Event) -> Void) async throws -> Summarizer.Result? {
+        guard let engine, let html = filing.filingHTML else { return nil }
+        let segments = config.mapping.rows.compactMap { r -> (name: String, dims: [String: String])? in
+            guard let d = r.terms?.first?.dims, !d.isEmpty else { return nil }
+            return (r.label, d)
+        }
+        let kf = KeyFigures.compute(facts: filing.facts, period: filing.period, prior: filing.prior, segments: segments)
+        let result = try await Summarizer(engine: engine, options: config.summaryOptions)
+            .summarize(filingHTML: html, company: filing.company, keyFigures: kf) { p in log(.summary(p)) }
+        if write, let prefix = config.summarySheetPrefix {
+            try await writeSummary(result, title: "\(prefix)\(filing.period.fiscalYear)", company: filing.company, sheets: sheets)
+            log(.log("Souhrn zapsán na list „\(prefix)\(filing.period.fiscalYear)“"))
+        }
+        return result
     }
 
     func writeSummary(_ s: Summarizer.Result, title: String, company: String, sheets: GoogleSheetsClient) async throws {

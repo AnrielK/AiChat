@@ -14,14 +14,23 @@ import FinFillCore
 @Observable
 final class GoogleAuth {
     static let shared = GoogleAuth()
-    static let scope = "https://www.googleapis.com/auth/spreadsheets"
+    /// Zápis do sešitů + seznam souborů pro výběr sešitu (jen názvy, ne obsah).
+    static let scopes = ["https://www.googleapis.com/auth/spreadsheets", GoogleDriveClient.scope]
     private static let clientIDKey = "google.oauth.clientID"
+    private static let grantedKey = "google.oauth.scopes"
 
     /// iOS OAuth client ID z Google Cloud Console („…apps.googleusercontent.com“). Není tajný.
     var clientID: String = UserDefaults.standard.string(forKey: GoogleAuth.clientIDKey) ?? "" {
         didSet { UserDefaults.standard.set(clientID.trimmingCharacters(in: .whitespacesAndNewlines), forKey: Self.clientIDKey) }
     }
     private(set) var isSignedIn = KeychainHelper.read(.googleRefresh) != nil
+    /// Oprávnění, která uživatel opravdu udělil (Google dovolí některá odškrtnout).
+    private(set) var grantedScopes = Set((UserDefaults.standard.string(forKey: GoogleAuth.grantedKey) ?? "").split(separator: " ").map(String.init))
+    /// Přihlášení z dřívější verze nemá oprávnění k Disku – je potřeba se přihlásit znovu.
+    var hasAllScopes: Bool { Set(Self.scopes).isSubset(of: grantedScopes) }
+    /// Zápis do sešitů je nutný; seznam souborů (Disk) je jen pohodlí – když ho uživatel
+    /// při souhlasu odškrtne, výběr sešitu ohlásí chybu a URL jde zadat ručně.
+    private var canWriteSheets: Bool { grantedScopes.contains(Self.scopes[0]) }
     private(set) var isWorking = false
     var lastError: String?
 
@@ -50,8 +59,8 @@ final class GoogleAuth {
 
     /// Platný access token; když chybí, obnoví ho z refresh tokenu, případně otevře přihlášení.
     func validAccessToken() async throws -> String {
-        if let token = accessToken, expiry.timeIntervalSinceNow > 60 { return token }
-        if let refresh = KeychainHelper.read(.googleRefresh) {
+        if let token = accessToken, expiry.timeIntervalSinceNow > 60, canWriteSheets { return token }
+        if let refresh = KeychainHelper.read(.googleRefresh), canWriteSheets {
             do {
                 return try await refreshAccess(with: refresh)
             } catch {
@@ -79,7 +88,8 @@ final class GoogleAuth {
             .init(name: "client_id", value: clientID),
             .init(name: "redirect_uri", value: redirect),
             .init(name: "response_type", value: "code"),
-            .init(name: "scope", value: Self.scope),
+            .init(name: "scope", value: Self.scopes.joined(separator: " ")),
+            .init(name: "include_granted_scopes", value: "true"),
             .init(name: "code_challenge", value: challenge),
             .init(name: "code_challenge_method", value: "S256"),
             .init(name: "access_type", value: "offline"),
@@ -126,6 +136,8 @@ final class GoogleAuth {
             Task.detached { _ = try? await URLSession.shared.data(for: req) }
         }
         KeychainHelper.delete(.googleRefresh)
+        UserDefaults.standard.removeObject(forKey: Self.grantedKey)
+        grantedScopes = []
         accessToken = nil
         expiry = .distantPast
         isSignedIn = false
@@ -140,6 +152,10 @@ final class GoogleAuth {
 
     private func apply(_ json: [String: Any]) {
         accessToken = json["access_token"] as? String
+        if let scope = json["scope"] as? String {
+            grantedScopes = Set(scope.split(separator: " ").map(String.init))
+            UserDefaults.standard.set(scope, forKey: Self.grantedKey)
+        }
         let seconds = (json["expires_in"] as? Double) ?? (json["expires_in"] as? Int).map(Double.init) ?? 3_600
         expiry = Date().addingTimeInterval(seconds)
     }

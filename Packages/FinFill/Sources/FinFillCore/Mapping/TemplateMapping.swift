@@ -35,6 +35,9 @@ public struct TemplateMapping: Codable, Sendable {
         public var refs: [Ref]?
         /// Literal formula; `{col}` = target column, `{prev}` = previous column. E.g. "={prev}30".
         public var formula: String?
+        /// For a formula row in the first year column (no previous column): instant concepts read
+        /// at the end of the previous fiscal year instead — e.g. cash at the beginning of the period.
+        public var opening: [String]?
     }
 
     public struct Check: Codable, Sendable {
@@ -42,8 +45,15 @@ public struct TemplateMapping: Codable, Sendable {
         public var sheet: String
         public var rows: [String]         // "+3", "-6"
         public var concept: String
+        /// Alternative concepts for the reported total (companies tag differently).
+        public var alt: [String]?
         public var period: PeriodType
         public var unit: String?
+        /// Row that absorbs a difference ("other …" line), so templates with fewer lines than the
+        /// company's statement still add up. Plugs are reported, never silent.
+        public var plugRow: Int?
+
+        public var concepts: [String] { [concept] + (alt ?? []) }
     }
 
     public var name: String
@@ -60,6 +70,14 @@ public struct TemplateMapping: Codable, Sendable {
 
     public static func load(from data: Data) throws -> TemplateMapping {
         try JSONDecoder().decode(TemplateMapping.self, from: data)
+    }
+
+    /// Universal mapping (total revenue, no segments) — for the universal template and any company.
+    public static func bundledUniversal() throws -> TemplateMapping {
+        guard let url = Bundle.module.url(forResource: "valuation-universal-mapping", withExtension: "json") else {
+            throw CocoaError(.fileNoSuchFile)
+        }
+        return try load(from: Data(contentsOf: url))
     }
 
     /// The bundled mapping for "NVDA Valuation - 5y".
@@ -83,10 +101,15 @@ public struct ResolvedRow: Sendable, Identifiable {
     public let components: [Component]
     public let missing: [String]            // required concepts not found
     public let missingOptional: [String]
-    /// Numeric value of the cell including refs (nil for literal formulas or unresolved rows).
+    /// Numeric value of the cell including refs and plug (nil for literal formulas or unresolved rows).
     public internal(set) var value: Double?
+    /// Amount added by reconciliation (see `TemplateMapping.Check.plugRow`).
+    public internal(set) var adjustment: Double = 0
+    /// Checks that put the adjustment here.
+    public internal(set) var adjustedBy: [String] = []
 
     public var isComplete: Bool { missing.isEmpty }
+    public var isAdjusted: Bool { adjustment != 0 }
 }
 
 /// What will be written into one cell.
@@ -149,6 +172,15 @@ public enum MappingResolver {
         return rows
     }
 
+    /// Sheets for which the period has real data: at least one required concept was found.
+    /// A 10-K has three years of income / cash flow but only two balance sheets — the third year's
+    /// balance sheet must stay empty instead of being filled with the zeros of optional lines.
+    public static func sheetsWithData(_ rows: [ResolvedRow]) -> Set<String> {
+        Set(rows.filter { r in
+            r.isComplete && (r.spec.terms ?? []).contains { $0.optional != true } && !r.components.isEmpty
+        }.map(\.spec.sheet))
+    }
+
     /// Renders the cell content in the template's style: a plain number for a single concept,
     /// otherwise a formula that keeps the components visible, e.g. `=807+10979+3038` or `=21352-O21`.
     public static func content(for row: ResolvedRow, column: String, previousColumn: String) -> CellContent? {
@@ -156,12 +188,11 @@ public enum MappingResolver {
             return .formula(f.replacingOccurrences(of: "{col}", with: column)
                              .replacingOccurrences(of: "{prev}", with: previousColumn))
         }
-        guard row.isComplete, row.spec.terms != nil else { return nil }
+        guard row.value != nil, row.spec.terms != nil else { return nil }
         let refs = row.spec.refs ?? []
-        if row.components.count <= 1 && refs.isEmpty {
-            return .number(row.components.first?.value ?? 0)
-        }
-        let parts = row.components.filter { $0.value != 0 }
+        var all = row.components
+        if row.adjustment != 0 { all.append(.init(concept: "reconciliation", value: row.adjustment)) }
+        let parts = all.filter { $0.value != 0 }
         if parts.count <= 1 && refs.isEmpty {
             return .number(parts.first?.value ?? 0)
         }

@@ -207,6 +207,10 @@ struct LocalModelSettings: Codable, Equatable, Sendable {
     /// že se readahead ztrácí kvůli objemu ohlášenému naráz, tím padla. Volba zůstává
     /// jen pro pokusy na jiném hardwaru.
     var prefetchWaveMB = 0
+    /// Při prefillu přečíst celé tenzory expertů vrstvy sekvenčně, když dávka vybere aspoň
+    /// tolik procent expertů vrstvy (0 = vypnuto). Viz `ExpertPrefetcher.wholeLayerCoverage`.
+    /// Výchozí vypnuto, dokud to nezměří iPhone – podle záznamu by od 30 % mělo pomáhat.
+    var prefillWholeLayerPercent = 0
     /// Zaznamenávat, které experty router vybírá, a měřit zásah page cache (`mincore`).
     /// Záznam jde v Parametrech přehrát v simulátoru cache (`ExpertCacheSimulator`) nebo na
     /// počítači nástrojem `tools/expert_cache_sim.py`. Diagnostika, proto mimo předvolby.
@@ -389,6 +393,7 @@ extension LocalModelSettings {
             preset.prefetchExperts = true
             preset.prefaultPages = true
             preset.prefetchWaveMB = 0
+            preset.prefillWholeLayerPercent = 0
             preset.prefetchSplitOnly = false
             preset.repackDense = true
             preset.streamingGPU = false
@@ -488,6 +493,7 @@ extension LocalModelSettings {
         prefaultPages = try container.decodeIfPresent(Bool.self, forKey: .prefaultPages) ?? prefaultPages
         prefetchWaveMB = try container.decodeIfPresent(Int.self, forKey: .prefetchWaveMB) ?? prefetchWaveMB
         recordExpertTrace = try container.decodeIfPresent(Bool.self, forKey: .recordExpertTrace) ?? recordExpertTrace
+        prefillWholeLayerPercent = try container.decodeIfPresent(Int.self, forKey: .prefillWholeLayerPercent) ?? prefillWholeLayerPercent
         streamingGPU = try container.decodeIfPresent(Bool.self, forKey: .streamingGPU) ?? streamingGPU
         repackDense = try container.decodeIfPresent(Bool.self, forKey: .repackDense) ?? repackDense
         expertsPerToken = try container.decodeIfPresent(Int.self, forKey: .expertsPerToken) ?? expertsPerToken

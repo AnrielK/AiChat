@@ -33,6 +33,7 @@ from dataclasses import dataclass, field
 
 MAGIC = b"AXTR"
 UNMEASURED = 0xFFFF
+RESIDENT_BIT = 0x8000
 GB = 1024 ** 3
 MB = 1024 ** 2
 DEFAULT_SIZES_GB = [0.25, 0.5, 1, 1.5, 2, 3, 4, 6]
@@ -45,6 +46,7 @@ class Event:
     resident: int | None
     experts: list[int]
     predicted: list[int] = field(default_factory=list)
+    resident_set: set[int] | None = None  # verze 3: kteří z experts/predicted leželi v cache
 
 
 @dataclass
@@ -62,7 +64,7 @@ def read_trace(path: str) -> Trace:
     if data[:4] != MAGIC:
         sys.exit(f"{path}: není záznam expertů (.axtr)")
     version, expert_count, layer_count, flags = struct.unpack_from("<4H", data, 4)
-    if version not in (1, 2):
+    if version not in (1, 2, 3):
         sys.exit(f"{path}: nepodporovaná verze {version}")
     offset = 12
     slices = list(struct.unpack_from(f"<{layer_count}I", data, offset))
@@ -83,9 +85,16 @@ def read_trace(path: str) -> Trace:
         experts = list(struct.unpack_from(f"<{count}H", data, offset + head))
         predicted = list(struct.unpack_from(f"<{predicted_count}H", data, offset + head + 2 * count))
         offset = end
+        resident_set = None
+        if version >= 3:
+            if resident != UNMEASURED:
+                resident_set = {e & ~RESIDENT_BIT for e in experts + predicted if e & RESIDENT_BIT}
+            experts = [e & ~RESIDENT_BIT for e in experts]
+            predicted = [e & ~RESIDENT_BIT for e in predicted]
         if layer >= layer_count or any(e >= expert_count for e in experts + predicted):
             continue
-        events.append(Event(layer, tokens, None if resident == UNMEASURED else resident, experts, predicted))
+        events.append(Event(layer, tokens, None if resident == UNMEASURED else resident,
+                            experts, predicted, resident_set))
     return Trace(expert_count, slices, name, bool(flags & 1), bool(flags & 2), events)
 
 
@@ -212,11 +221,24 @@ class Guess:
     needed: int = 0
     hit: int = 0
     extra: int = 0
+    # Jen se záznamem verze 3 (víme, kteří experti chyběli v cache):
+    miss_needed: int = 0  # bajty expertů, které opravdu bylo nutné číst z flash
+    miss_hit: int = 0     # z toho by odhad načetl dopředu
+    io_extra: int = 0     # zbytečně přečtené bajty – jen odhadnutí, kteří v cache neleželi
 
-    def add(self, actual: set[int], guess: set[int], size: int) -> None:
+    def add(self, actual: set[int], guess: set[int], size: int,
+            resident: set[int] | None = None, known: set[int] | None = None) -> None:
         self.needed += len(actual) * size
         self.hit += len(actual & guess) * size
         self.extra += len(guess - actual) * size
+        if resident is not None:
+            misses = actual - resident
+            self.miss_needed += len(misses) * size
+            self.miss_hit += len(misses & guess) * size
+            # Rezidence je známá jen u vybraných a odhadnutých z routeru. Experti z minulého
+            # tokenu mimo ně se berou jako v cache – před chvílí se četli (ověřeno: z výpadků
+            # jich v minulém tokenu bylo 0,1 %).
+            self.io_extra += len(((guess - actual) & (known or set())) - resident) * size
 
     @property
     def recall(self) -> float:
@@ -225,6 +247,14 @@ class Guess:
     @property
     def waste(self) -> float:
         return self.extra / self.needed if self.needed else 0.0
+
+    @property
+    def miss_recall(self) -> float | None:
+        return self.miss_hit / self.miss_needed if self.miss_needed else None
+
+    @property
+    def io_waste(self) -> float | None:
+        return self.io_extra / self.miss_needed if self.miss_needed else None
 
 
 def prediction_stats(trace: Trace) -> dict[str, Guess]:
@@ -238,16 +268,18 @@ def prediction_stats(trace: Trace) -> dict[str, Guess]:
         size = trace.slice_bytes[event.layer]
         k = len(actual)
         before = previous.get(event.layer)
+        resident = event.resident_set
+        known = set(event.predicted)
         if before is not None:
-            result["minulý token"].add(actual, before, size)
+            result["minulý token"].add(actual, before, size, resident, known)
         if event.predicted:
             for label, depth in (("router L+1", k), ("router L+1, k+2", k + 2),
                                  ("router L+1, k+4", k + 4), ("router L+1, 2k", 2 * k)):
                 if depth <= len(event.predicted):
-                    result.setdefault(label, Guess()).add(actual, set(event.predicted[:depth]), size)
+                    result.setdefault(label, Guess()).add(actual, set(event.predicted[:depth]), size, resident, known)
             if before is not None:
                 result.setdefault("router L+1 + minulý token", Guess()).add(
-                    actual, set(event.predicted[:k]) | before, size)
+                    actual, set(event.predicted[:k]) | before, size, resident, known)
         previous[event.layer] = actual
     return {label: guess for label, guess in result.items() if guess.needed}
 
@@ -353,13 +385,24 @@ def main() -> None:
     if guesses:
         print()
         print("předpověď expertů (generování)")
-        print(f"{'ODHAD':<28} {'TREFÍ':>7} {'NAVÍC':>7}")
+        measured = any(g.miss_needed for g in guesses.values())
+        header = f"{'ODHAD':<28} {'TREFÍ':>7} {'NAVÍC':>7}"
+        if measured:
+            header += f" {'VÝPADKY':>9} {'ČTENÍ NAVÍC':>12}"
+        print(header)
         for label, guess in guesses.items():
-            print(f"{label:<28} {guess.recall * 100:6.1f}% {guess.waste * 100:6.1f}%")
+            line = f"{label:<28} {guess.recall * 100:6.1f}% {guess.waste * 100:6.1f}%"
+            if measured and guess.miss_recall is not None:
+                line += f" {guess.miss_recall * 100:8.1f}% {guess.io_waste * 100:11.1f}%"
+            print(line)
         if not trace.has_predictions:
             print("(odhad z routeru chybí – záznam verze 1 nebo model bez routerů v F32/F16/BF16)")
         print("TREFÍ = podíl potřebných bajtů, které by odhad načetl dopředu.")
         print("NAVÍC = zbytečně přečtené bajty vůči potřebným (100 % = dvojnásobné čtení).")
+        if measured:
+            print("VÝPADKY = podíl expertů, kteří v cache chyběli, a odhad by je načetl dopředu – to je")
+            print("          skutečný přínos předčítání. ČTENÍ NAVÍC = zbytečné čtení z flash (odhadnutí,")
+            print("          kteří nebyli potřeba ani v cache) vůči nutnému čtení.")
 
     coverage = prefill_coverage(trace)
     if coverage.events:

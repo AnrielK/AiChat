@@ -330,6 +330,7 @@ actor LlamaEngine {
         activePrefetcher?.splitOnly = settings.prefetchSplitOnly
         activePrefetcher?.prefaultPages = settings.prefaultPages
         activePrefetcher?.waveBytes = settings.prefetchWaveMB * 1_048_576
+        activePrefetcher?.wholeLayerCoverage = Double(max(0, settings.prefillWholeLayerPercent)) / 100
         let waveNote = settings.prefaultPages && settings.prefetchWaveMB > 0
             ? " po \(settings.prefetchWaveMB) MB" : ""
         let traceNote = settings.recordExpertTrace && activePrefetcher != nil ? " · záznam expertů" : ""
@@ -553,6 +554,14 @@ actor LlamaEngine {
             \(megabytes) MB za \(decimal(stats.seconds)) s \
             (\(decimal(share, digits: 0)) % z \(decimal(total)) s)
             """)
+        if stats.wholeLayers > 0 {
+            let wholeMB = stats.wholeLayerBytes / 1_048_576
+            let rate = stats.wholeLayerSeconds > 0 ? Double(stats.wholeLayerBytes) / stats.wholeLayerSeconds / 1_073_741_824 : 0
+            log.notice("""
+                \(phase): celé vrstvy \(stats.wholeLayers)× · \(wholeMB) MB za \(decimal(stats.wholeLayerSeconds)) s \
+                (\(decimal(rate, digits: 2)) GB/s)
+                """)
+        }
     }
 
     /// Zásah page cache expertů změřený před předčtením (jen se zapnutým záznamem trace).

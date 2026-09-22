@@ -1,3 +1,28 @@
+# MoE: celá vrstva při prefillu, rezidence po expertech v záznamu
+
+Podle prvního záznamu z iPhonu (Qwen3-30B-A3B, 797 tokenů, k = 8):
+
+- **Zjištění.** Naměřený zásah page cache 67,3 % odpovídá simulované LRU cache o 2 GB (67,8 %). iOS tedy
+  expertům dává zhruba 2 GB a simulace sedí se skutečností. Při 3 GB by zásah byl 80 % a čtení na token
+  213 místo 339 MB, při 4 GB 87 % a 140 MB. Jen 0,1 % výpadků byli experti z minulého tokenu, takže
+  předpověď „z minulého tokenu“ předčítání nepomůže. Prefill vybírá průměrně 40 % expertů vrstvy
+  a 74 % vrstev je nad 30 %.
+- **Prefill: celá vrstva** (`prefillWholeLayerPercent`, Parametry › Výkon, výchozí vypnuto; volby
+  30 / 50 / 70 %). Při dávce > 1 a pokrytí nad prahem `ExpertPrefetcher` nejdřív přečte celé tenzory
+  expertů vrstvy sekvenčně (`pread` po 8 MB, paralelně, přes page cache) a teprve pak jde běžné
+  předčítání vybraných expertů. Do logu se zapíše „celé vrstvy N× · X MB za Y s (Z GB/s)“.
+- **Záznam v3**: horní bit (0x8000) čísla experta = expert ležel celý v page cache. Měří se i odhadnutí
+  experti z routeru. Soubor nevyroste a verze 1 a 2 se dál čtou.
+- **Simulace › Předpověď expertů**: nové sloupce „výpadky“ (kolik expertů chybějících v cache by odhad
+  načetl dopředu) a „čtení navíc“ (zbytečné čtení z flash vůči nutnému). Experti z minulého tokenu mimo
+  odhad z routeru se berou jako v cache. Totéž umí `tools/expert_cache_sim.py`.
+
+Ověřeno v Pythonu: syntetický záznam v3 (LRU 2 GB) dává u minulého tokenu 0 % výpadků, stejně jako
+reálná data. Záznamy v1 a v2 se dál čtou a politiky cache sedí s naivními implementacemi. Swift je
+nepřeložený.
+
+---
+
 # MoE: vyhodnocení předpovědi expertů a pokrytí prefillu
 
 Navazuje na záznam expertů. Cílem je zjistit, jestli se vyplatí předčítat experty dopředu,

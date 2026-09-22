@@ -82,6 +82,12 @@ final class ExpertPrefetcher: @unchecked Sendable {
     /// omezený počtem operací (~75 000/s, tedy ~1,1 GB/s) místo propustností (~3,7 GB/s).
     /// Menší vlna drží objem nevyřízeného readaheadu v mezích, ve kterých funguje.
     var waveBytes = 0
+    /// Při prefillu přečíst celé tenzory expertů vrstvy sekvenčně, když dávka vybere aspoň
+    /// tenhle podíl expertů vrstvy (0 = nikdy). Prefill dostává z úložiště jednu 16kB stránku
+    /// na operaci (~1,1 GB/s), sekvenční čtení velkými bloky jde ~3,7 GB/s – od ~30 % pokrytí
+    /// je rychlejší přečíst všechno, i když se tím přečte víc bajtů. Záznam z iPhonu
+    /// (Qwen3-30B-A3B, dávky 20–52 tokenů): průměrné pokrytí 40 %, 74 % vrstev nad 30 %.
+    var wholeLayerCoverage = 0.0
 
     /// Adresa začátku souboru v mmapu llama.cpp (tenzor = adresa + offset v souboru).
     /// Zjistí se z prvního `MUL_MAT_ID` uzlu, který scheduler nabídne callbacku.
@@ -111,6 +117,10 @@ final class ExpertPrefetcher: @unchecked Sendable {
         var measuredBytes = 0
         var residentBytes = 0
         var measuredSeconds = 0.0
+        /// Vrstvy prefillu přečtené celé (`wholeLayerCoverage`) a kolik to bylo bajtů.
+        var wholeLayers = 0
+        var wholeLayerBytes = 0
+        var wholeLayerSeconds = 0.0
     }
 
     init?(path: String, layout: GGUFLayout) {
@@ -271,17 +281,21 @@ final class ExpertPrefetcher: @unchecked Sendable {
         let prediction = pendingPredictions.removeValue(forKey: layer)
         if let traceWriter {
             let measureStart = Date.now
-            let measured = residency(of: selected, in: tensors)
             let predicted = batchTokens == 1 ? prediction ?? [] : []
+            // Měří se i odhadnutí experti: simulátor pak ví, kolik by předčítání podle odhadu
+            // opravdu četlo z flash (odhad, který už v cache leží, nic nestojí).
+            let measured = residency(of: Array(Set(selected).union(predicted)), in: tensors)
             traceWriter.append(layer: layer, tokens: batchTokens, experts: selected,
-                               resident: measured?.experts, predicted: predicted)
+                               predicted: predicted, resident: measured?.resident)
             if let measured {
                 let elapsed = Date.now.timeIntervalSince(measureStart)
+                let hits = selected.filter { measured.resident.contains($0) }
+                let residentBytes = selected.reduce(0) { $0 + (measured.residentBytes[$1] ?? 0) }
                 stats.withLock {
                     $0.measuredExperts += selected.count
-                    $0.residentExperts += measured.experts
-                    $0.measuredBytes += measured.totalBytes
-                    $0.residentBytes += measured.residentBytes
+                    $0.residentExperts += hits.count
+                    $0.measuredBytes += selected.count * measured.expertBytes
+                    $0.residentBytes += residentBytes
                     $0.measuredSeconds += elapsed
                 }
             }
@@ -289,6 +303,20 @@ final class ExpertPrefetcher: @unchecked Sendable {
         if splitOnly || !readEnabled {
             stats.withLock { $0.layers += 1 }
             return
+        }
+
+        // Prefill s velkým pokrytím: nejdřív celé tenzory vrstvy sekvenčně do page cache.
+        // Předčítání vybraných expertů níž pak už jen najde stránky v cache a namapuje je.
+        let coverage = Double(selected.count) / Double(max(1, expertCount))
+        if batchTokens > 1, wholeLayerCoverage > 0, coverage >= wholeLayerCoverage {
+            let wholeStart = Date.now
+            let wholeBytes = readWholeLayer(tensors)
+            let elapsed = Date.now.timeIntervalSince(wholeStart)
+            stats.withLock {
+                $0.wholeLayers += 1
+                $0.wholeLayerBytes += wholeBytes
+                $0.wholeLayerSeconds += elapsed
+            }
         }
 
         let start = Date.now
@@ -384,7 +412,27 @@ final class ExpertPrefetcher: @unchecked Sendable {
         }
     }
 
-    /// Kolik z vybraných expertů leží v page cache, zjištěno přes `mincore` nad vlastním
+    /// Přečte celé tenzory expertů vrstvy sekvenčně po `chunkBytes` blocích, paralelně.
+    /// Čte se přes page cache (bez `F_NOCACHE`), takže výsledek zůstane v cache pro výpočet;
+    /// stránky, které v ní už jsou, se jen zkopírují. Vrací počet přečtených bajtů.
+    private func readWholeLayer(_ tensors: [GGUFLayout.ExpertTensor]) -> Int {
+        var chunks: [(offset: Int, bytes: Int)] = []
+        for expertTensor in tensors {
+            var offset = expertTensor.fileOffset
+            let end = expertTensor.fileOffset + expertTensor.bytes
+            while offset < end {
+                let bytes = min(Self.chunkBytes, end - offset)
+                chunks.append((offset, bytes))
+                offset += bytes
+            }
+        }
+        DispatchQueue.concurrentPerform(iterations: chunks.count) { index in
+            self.readRange(offset: chunks[index].offset, bytes: chunks[index].bytes)
+        }
+        return chunks.reduce(0) { $0 + $1.bytes }
+    }
+
+    /// Kteří z daných expertů leží v page cache, zjištěno přes `mincore` nad vlastním
     /// mapováním souboru. Na Darwinu mapování i čtení z deskriptoru sdílí jeden VM objekt
     /// souboru, takže `mincore` hlásí stránky, které jsou v cache, i když je tohle mapování
     /// ještě nikdy nedotklo. Nic se tím nečte ani nemapuje.
@@ -392,16 +440,17 @@ final class ExpertPrefetcher: @unchecked Sendable {
     /// Expert je zásah, jen když leží v cache celý (všechny tři tenzory, všechny stránky):
     /// jediná chybějící stránka znamená čekání na flash uprostřed násobení.
     private func residency(
-        of selected: [Int],
+        of experts: [Int],
         in tensors: [GGUFLayout.ExpertTensor]
-    ) -> (experts: Int, residentBytes: Int, totalBytes: Int)? {
+    ) -> (resident: Set<Int>, residentBytes: [Int: Int], expertBytes: Int)? {
         guard let ownMap, ownMapBytes > 0, !residencyFailed else { return nil }
         let pageMask = Self.pageSize - 1
-        var residentExperts = 0
-        var residentBytes = 0
-        var totalBytes = 0
-        for expert in selected {
+        var residentExperts = Set<Int>()
+        var residentBytes: [Int: Int] = [:]
+        let expertBytes = tensors.reduce(0) { $0 + $1.bytes / expertCount }
+        for expert in experts {
             var whole = true
+            var inCache = 0
             for expertTensor in tensors {
                 let slice = expertTensor.bytes / expertCount
                 guard slice > 0 else { continue }
@@ -424,12 +473,12 @@ final class ExpertPrefetcher: @unchecked Sendable {
                 var incore = 0
                 for page in 0..<pages where residencyVector[page] & 1 != 0 { incore += 1 }
                 if incore < pages { whole = false }
-                totalBytes += slice
-                residentBytes += min(slice, incore * Self.pageSize)
+                inCache += min(slice, incore * Self.pageSize)
             }
-            if whole { residentExperts += 1 }
+            if whole { residentExperts.insert(expert) }
+            residentBytes[expert] = inCache
         }
-        return (residentExperts, residentBytes, totalBytes)
+        return (residentExperts, residentBytes, expertBytes)
     }
 
     /// Sáhne na každou stránku rozsahu – jádro ji namapuje do procesu (a když ještě není

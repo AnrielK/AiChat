@@ -12,7 +12,7 @@ import os
 /// Soubor `.axtr` (little-endian):
 ///
 ///     "AXTR"            4 B   magic
-///     version           u16   2 (1 = bez odhadu, čte se dál)
+///     version           u16   3 (1 = bez odhadu, 2 = bez rezidence po expertech; obě se čtou dál)
 ///     expertCount       u16   expertů na vrstvu
 ///     layerCount        u16   nejvyšší index vrstvy + 1
 ///     flags             u16   bit 0 = u událostí je změřená rezidence (mincore)
@@ -27,14 +27,19 @@ import os
 ///       resident        u16   kolik z nich leželo celých v page cache, 0xFFFF = neměřeno
 ///       predictedCount  u16   jen verze 2: délka odhadu (0 = bez odhadu)
 ///       experts         u16 × count, vzestupně
-///       predicted       u16 × predictedCount, jen verze 2: odhad `RouterPredictor` udělaný
+///       predicted       u16 × predictedCount, jen verze 2+: odhad `RouterPredictor` udělaný
 ///                             o vrstvu dřív, seřazený od nejvyššího skóre routeru
+///
+/// Od verze 3 nese horní bit (0x8000) čísla experta v `experts` i `predicted`, že expert ležel
+/// celý v page cache (měřeno u rezidence ≠ 0xFFFF). Simulátor tak ví, *kteří* experti chyběli,
+/// ne jen kolik – předpověď má smysl hodnotit jen na výpadcích.
 ///
 /// U prefillu se ukládá sjednocení výběru přes celou dávku – pořadí po tokenech se v callbacku
 /// nedá levně zachovat a pro cache na něm nezáleží (dávka se počítá naráz).
 struct ExpertTrace: Sendable {
     static let magic: [UInt8] = Array("AXTR".utf8)
-    static let version: UInt16 = 2
+    static let version: UInt16 = 3
+    static let residentBit: UInt16 = 0x8000
     static let unmeasured: UInt16 = 0xFFFF
     static let fileExtension = "axtr"
 
@@ -46,6 +51,8 @@ struct ExpertTrace: Sendable {
         let experts: [UInt16]
         /// Odhad z routeru o vrstvu dřív, seřazený podle skóre. Prázdné = bez odhadu.
         let predicted: [UInt16]
+        /// Kteří z `experts` a `predicted` leželi celí v page cache (verze 3). nil = neví se.
+        let residentSet: Set<UInt16>?
 
         var isDecode: Bool { tokens == 1 }
     }
@@ -87,7 +94,7 @@ struct ExpertTrace: Sendable {
         var reader = ByteReader(data: data)
         guard let magic = reader.bytes(4), magic == Self.magic else { throw ParseError.notATrace }
         guard let version = reader.u16() else { throw ParseError.truncated }
-        guard version == 1 || version == 2 else { throw ParseError.unsupportedVersion(Int(version)) }
+        guard (1...3).contains(version) else { throw ParseError.unsupportedVersion(Int(version)) }
         guard let expertCount = reader.u16(), let layerCount = reader.u16(), let flags = reader.u16() else {
             throw ParseError.truncated
         }
@@ -113,8 +120,24 @@ struct ExpertTrace: Sendable {
             } else {
                 predictedCount = 0
             }
-            guard let experts = reader.u16Array(Int(count)),
-                  let predicted = reader.u16Array(Int(predictedCount)) else { break }
+            guard var experts = reader.u16Array(Int(count)),
+                  var predicted = reader.u16Array(Int(predictedCount)) else { break }
+            var residentSet: Set<UInt16>?
+            if version >= 3, resident != Self.unmeasured {
+                var set = Set<UInt16>()
+                for index in experts.indices where experts[index] & Self.residentBit != 0 {
+                    experts[index] &= ~Self.residentBit
+                    set.insert(experts[index])
+                }
+                for index in predicted.indices where predicted[index] & Self.residentBit != 0 {
+                    predicted[index] &= ~Self.residentBit
+                    set.insert(predicted[index])
+                }
+                residentSet = set
+            } else if version >= 3 {
+                experts = experts.map { $0 & ~Self.residentBit }
+                predicted = predicted.map { $0 & ~Self.residentBit }
+            }
             // Poškozená událost (vrstva nebo expert mimo rozsah) by simulátor shodila – přeskočit.
             guard Int(layer) < slices.count,
                   (experts + predicted).allSatisfy({ Int($0) < Int(expertCount) }) else { continue }
@@ -123,7 +146,8 @@ struct ExpertTrace: Sendable {
                 tokens: Int(tokens),
                 resident: resident == Self.unmeasured ? nil : Int(resident),
                 experts: experts,
-                predicted: predicted
+                predicted: predicted,
+                residentSet: residentSet
             ))
         }
 
@@ -181,16 +205,24 @@ final class ExpertTraceWriter: @unchecked Sendable {
     }
 
     /// Volá se z callbacku výpočtu – jen přidá do bufferu.
-    func append(layer: Int, tokens: Int, experts: [Int], resident: Int?, predicted: [Int]) {
+    /// `resident` = kteří z `experts` a `predicted` leží celí v page cache (nil = neměřeno).
+    func append(layer: Int, tokens: Int, experts: [Int], predicted: [Int], resident: Set<Int>?) {
+        let residentCount = resident.map { set in experts.filter { set.contains($0) }.count }
+        let encode = { (expert: Int) -> UInt16 in
+            let id = UInt16(clamping: expert) & ~ExpertTrace.residentBit
+            return resident?.contains(expert) == true ? id | ExpertTrace.residentBit : id
+        }
+        let encodedExperts = experts.map(encode)
+        let encodedPredicted = predicted.map(encode)
         let shouldFlush = state.withLock { (state: inout State) -> Bool in
             guard !state.failed else { return false }
             state.pending.appendLE(UInt16(clamping: layer))
             state.pending.appendLE(UInt16(clamping: tokens))
             state.pending.appendLE(UInt16(clamping: experts.count))
-            state.pending.appendLE(resident.map { UInt16(clamping: min($0, 0xFFFE)) } ?? ExpertTrace.unmeasured)
+            state.pending.appendLE(residentCount.map { UInt16(clamping: min($0, 0xFFFE)) } ?? ExpertTrace.unmeasured)
             state.pending.appendLE(UInt16(clamping: predicted.count))
-            for expert in experts { state.pending.appendLE(UInt16(clamping: expert)) }
-            for expert in predicted { state.pending.appendLE(UInt16(clamping: expert)) }
+            for expert in encodedExperts { state.pending.appendLE(expert) }
+            for expert in encodedPredicted { state.pending.appendLE(expert) }
             state.events += 1
             return state.pending.count >= Self.flushThreshold
         }

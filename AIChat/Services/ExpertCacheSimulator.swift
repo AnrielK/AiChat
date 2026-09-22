@@ -87,6 +87,12 @@ enum ExpertCacheSimulator {
         let recall: Double
         /// Zbytečně přečtené bajty vůči potřebným (1 = dvojnásobné čtení).
         let waste: Double
+        /// Jen záznam verze 3: podíl expertů, kteří v cache chyběli, a odhad by je načetl
+        /// dopředu – skutečný přínos předčítání.
+        let missRecall: Double?
+        /// Jen záznam verze 3: zbytečné čtení z flash (odhadnutí, kteří nebyli potřeba ani
+        /// v cache) vůči nutnému čtení.
+        let ioWaste: Double?
 
         var id: String { label }
     }
@@ -184,11 +190,22 @@ enum ExpertCacheSimulator {
         var needed = 0
         var hit = 0
         var extra = 0
+        var missNeeded = 0
+        var missHit = 0
+        var ioExtra = 0
 
-        mutating func add(actual: Set<UInt16>, guess: Set<UInt16>, size: Int) {
+        mutating func add(actual: Set<UInt16>, guess: Set<UInt16>, size: Int,
+                          resident: Set<UInt16>?, known: Set<UInt16>) {
             needed += actual.count * size
             hit += actual.intersection(guess).count * size
             extra += guess.subtracting(actual).count * size
+            guard let resident else { return }
+            let misses = actual.subtracting(resident)
+            missNeeded += misses.count * size
+            missHit += misses.intersection(guess).count * size
+            // Rezidence je známá jen u vybraných a odhadnutých z routeru. Experti z minulého
+            // tokenu mimo ně se berou jako v cache – před chvílí se četli.
+            ioExtra += guess.subtracting(actual).intersection(known).subtracting(resident).count * size
         }
     }
 
@@ -209,17 +226,24 @@ enum ExpertCacheSimulator {
             let size = trace.sliceBytes[event.layer]
             let k = actual.count
             let before = previous[event.layer]
-            if let before { guesses[previousLabel, default: Guess()].add(actual: actual, guess: before, size: size) }
+            let resident = event.residentSet
+            let known = Set(event.predicted)
+            if let before {
+                guesses[previousLabel, default: Guess()].add(
+                    actual: actual, guess: before, size: size, resident: resident, known: known)
+            }
             if !event.predicted.isEmpty {
                 for depth in depths {
                     let count = depth.extra(k)
                     guard count <= event.predicted.count else { continue }
                     guesses[depth.label, default: Guess()].add(
-                        actual: actual, guess: Set(event.predicted.prefix(count)), size: size)
+                        actual: actual, guess: Set(event.predicted.prefix(count)), size: size,
+                        resident: resident, known: known)
                 }
                 if let before {
                     guesses[combinedLabel, default: Guess()].add(
-                        actual: actual, guess: Set(event.predicted.prefix(k)).union(before), size: size)
+                        actual: actual, guess: Set(event.predicted.prefix(k)).union(before), size: size,
+                        resident: resident, known: known)
                 }
             }
             previous[event.layer] = actual
@@ -230,7 +254,9 @@ enum ExpertCacheSimulator {
             return PredictionRow(
                 label: label,
                 recall: Double(guess.hit) / Double(guess.needed),
-                waste: Double(guess.extra) / Double(guess.needed)
+                waste: Double(guess.extra) / Double(guess.needed),
+                missRecall: guess.missNeeded > 0 ? Double(guess.missHit) / Double(guess.missNeeded) : nil,
+                ioWaste: guess.missNeeded > 0 ? Double(guess.ioExtra) / Double(guess.missNeeded) : nil
             )
         }
     }

@@ -346,3 +346,64 @@ final class TemplateTests: XCTestCase {
         XCTAssertEqual(fr["'CashFlowStatement'!G28"], .number(8589))
     }
 }
+
+final class SegmentTests: XCTestCase {
+    let f = FinFillCoreTests.filing
+
+    func testLabels() {
+        XCTAssertEqual(SegmentExtractor.label("nvda:ComputeAndNetworkingSegmentMember"), "Compute & Networking")
+        XCTAssertEqual(SegmentExtractor.label("nvda:OEMAndOtherMember"), "OEM & Other")
+        XCTAssertEqual(SegmentExtractor.label("nvda:ChinaIncludingHongKongMember"), "China Including Hong Kong")
+        XCTAssertEqual(SegmentExtractor.label("country:TW"), "Tchaj-wan")
+        XCTAssertEqual(SegmentExtractor.label("nvda:DataCenterMember"), "Data Center")
+    }
+
+    func testExtractNVDA() throws {
+        let periods = f.facts.annualPeriods(latest: f.period, count: 9)
+        let groups = SegmentExtractor.extract(facts: f.segmentFacts, periods: periods)
+        XCTAssertEqual(groups.map(\.title), ["Segmenty", "Trhy / produkty", "Regiony"])
+        for g in groups {
+            for y in [2024, 2025, 2026] {
+                let total = g.topLevel.reduce(0) { $0 + ($1.values[y] ?? 0) }
+                let revenue = f.facts.value("us-gaap:Revenues", period: periods.first { $0.fiscalYear == y }!, type: .duration)!.value
+                XCTAssertEqual(total, revenue, accuracy: 1, "\(g.title) FY\(y)")
+            }
+        }
+        let seg = groups[0]
+        XCTAssertEqual(seg.lines.map(\.name), ["Compute & Networking", "Graphics"])
+        XCTAssertEqual(seg.lines[0].values[2026], 193_479_000_000)
+        XCTAssertEqual(seg.lines[1].values[2024], 13_517_000_000)
+        let markets = groups[1]
+        XCTAssertEqual(markets.lines.prefix(3).map(\.name), ["Data Center", "Compute", "Networking"])
+        XCTAssertEqual(markets.lines[1].parent, "nvda:DataCenterMember")
+        XCTAssertEqual(markets.lines[2].parent, "nvda:DataCenterMember")
+        XCTAssertEqual(markets.topLevel.map(\.name), ["Data Center", "Gaming", "Professional Visualization", "Automotive", "OEM & Other"])
+    }
+
+    func testSheetFormulas() throws {
+        let periods = f.facts.annualPeriods(latest: f.period, count: 9)
+        let groups = SegmentExtractor.extract(facts: f.segmentFacts, periods: periods)
+        var yc: [Int: Int] = [:]
+        for i in 0..<9 { yc[2018 + i] = 6 + i }
+        let req = SegmentSheet.updateCells(sheetId: 5, groups: groups, yearColumns: yc)
+        let u = req[0]["updateCells"] as! [String: Any]
+        let rows = u["rows"] as! [[String: Any]]
+        let size = SegmentSheet.gridSize(groups: groups, yearColumns: yc)
+        XCTAssertLessThanOrEqual(rows.count, size.rows)
+        XCTAssertLessThanOrEqual(rows.map { ($0["values"] as! [[String: Any]]).count }.max()!, size.columns)
+        func cell(_ a: String) -> [String: Any]? {
+            let (r, c) = A1.parse(a)!
+            let vals = rows[r]["values"] as! [[String: Any]]
+            return c < vals.count ? vals[c]["userEnteredValue"] as? [String: Any] : nil
+        }
+        XCTAssertEqual(cell("O2")?["formulaValue"] as? String, "=IncomeStatement!O2")
+        XCTAssertEqual(cell("B5")?["stringValue"] as? String, "Compute & Networking")
+        XCTAssertEqual(cell("O5")?["numberValue"] as? Double, 193479)
+        XCTAssertEqual(cell("M6")?["numberValue"] as? Double, 13517)
+        XCTAssertEqual(cell("O7")?["formulaValue"] as? String, "=IF(COUNT(O5,O6)=0,\"\",N(O5)+N(O6))")
+        XCTAssertEqual(cell("O8")?["formulaValue"] as? String, "=IncomeStatement!O5")
+        XCTAssertEqual(cell("B11")?["stringValue"] as? String, "Segmenty – meziroční změna")
+        XCTAssertEqual(cell("O12")?["formulaValue"] as? String, "=IF(OR(N5=\"\",O5=\"\",N(N5)=0),\"\",O5/N5-1)")
+        XCTAssertNil(cell("G12"))                       // no YoY in the first column
+    }
+}

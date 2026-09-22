@@ -1,3 +1,32 @@
+# FinFill: list Segments – tržby po segmentech, trzích a regionech
+
+Nový list **Segments** (v novém sešitu hned za IncomeStatement, v existujícím se při zápisu
+přegeneruje) se sloupci stejnými jako výkazy:
+
+- tři skupiny podle toho, co firma v XBRL vykazuje: **Segmenty** (`StatementBusinessSegmentsAxis`),
+  **Trhy / produkty** (`ProductOrServiceAxis`), **Regiony** (`StatementGeographicalAxis`),
+- pro každou skupinu: řádky, **Celkem**, **Tržby ve výsledovce** (`=IncomeStatement!…5`),
+  **Rozdíl** (eliminace, nezařazené), pak **meziroční změna** a **podíl na tržbách**,
+- podskupiny se poznají samy (Compute + Networking = Data Center): odsazené, šedě a nejsou
+  v součtu,
+- názvy z XBRL členů („nvda:ComputeAndNetworkingSegmentMember“ → „Compute & Networking“),
+  země česky.
+
+Segmenty jsou jen v iXBRL jednotlivých 10-K (companyfacts dimenze nemá) a jeden 10-K pokrývá
+3 roky – na 9 let se stáhnou i 10-K z doby před 3 a 6 lety. Hodnoty z novějšího podání mají
+přednost (přepočtené segmenty). Ze starších 10-K se berou jen segmentové tržby, ostatní čísla
+dál z companyfacts.
+
+Ověřeno v LibreOffice na NVDA FY2024–2026: všechny tři skupiny sečtené = tržby ve výsledovce,
+rozdíl 0; např. Compute & Networking +66,5 %, Data Center 89,7 % tržeb, Čína −21,4 %.
+
+Přepínač **List Segments** v Možnostech (výchozí zapnuto). Mapování „NVDA (segmenty)“ dál plní
+ř. 3/4 původního NVDA sešitu; nový sešit má v ř. 3 celkové tržby a segmenty na listu Segments.
+
+Testy: 21.
+
+---
+
 # FinFill: univerzální šablona a nové sešity
 
 ## Nový sešit ze šablony

@@ -9,6 +9,11 @@ public struct PreparedFiling: Sendable {
     public let prior: FiscalPeriod?
     public let filingHTML: String?
     public let documentURL: URL?
+    public var cik: Int? = nil
+    /// Older 10-Ks (newest first) — sources of segment revenue for earlier years.
+    public var olderFilings: [SECClient.Filing] = []
+    /// Dimensional revenue facts of this filing (segments, markets, regions).
+    public var segmentFacts: [Fact] = []
 
     /// Offline: from a downloaded 10-K (.htm, inline XBRL) and optionally a companyfacts JSON.
     public static func local(html: String, companyFacts: Data? = nil) throws -> PreparedFiling {
@@ -24,7 +29,8 @@ public struct PreparedFiling: Sendable {
         let fy = doc.fiscalYear ?? Int(end.prefix(4))!
         let period = FiscalPeriod(fiscalYear: fy, endDate: end, accession: accession)
         return PreparedFiling(company: doc.registrantName ?? "Company", ticker: doc.ticker, facts: store,
-                              period: period, prior: priorPeriod(store, before: period), filingHTML: html, documentURL: nil)
+                              period: period, prior: priorPeriod(store, before: period), filingHTML: html, documentURL: nil,
+                              segmentFacts: SegmentExtractor.revenueFacts(doc.facts))
     }
 
     static func priorPeriod(_ store: FactStore, before p: FiscalPeriod) -> FiscalPeriod? {
@@ -61,6 +67,8 @@ public struct FinFillPipeline: Sendable {
         public var writeEvenIfChecksFail = false
         public var backtestPriorYear = true
         public var summarySheetPrefix: String? = "Summary FY"   // nil = don't write the summary to Sheets
+        /// Sheet "Segments": revenue by segment / market / region, YoY change, share (rebuilt on write).
+        public var segments = true
         public var summaryOptions = Summarizer.Options()
 
         public init(ticker: String, secUserAgent: String, spreadsheet: String, mapping: TemplateMapping) {
@@ -86,6 +94,7 @@ public struct FinFillPipeline: Sendable {
         public let newColumns: [ColumnCreation]
         public let written: Int
         public let summary: Summarizer.Result?
+        public var segmentGroups: [SegmentGroup] = []
         public var allChecksPassed: Bool { checks.allSatisfy(\.passed) }
     }
 
@@ -130,7 +139,9 @@ public struct FinFillPipeline: Sendable {
         log(.log("Facts: \(cf.facts.count) companyfacts + \(doc.facts.count) inline XBRL, FY\(fy)"))
         return PreparedFiling(company: name, ticker: config.ticker, facts: store, period: period,
                               prior: PreparedFiling.priorPeriod(store, before: period),
-                              filingHTML: html, documentURL: filing.documentURL)
+                              filingHTML: html, documentURL: filing.documentURL, cik: cik,
+                              olderFilings: filings.filter { $0.reportDate < filing.reportDate },
+                              segmentFacts: SegmentExtractor.revenueFacts(doc.facts))
     }
 
     public func run(filing prepared: PreparedFiling? = nil,
@@ -180,10 +191,25 @@ public struct FinFillPipeline: Sendable {
             log(.log("Zapsáno \(written) buněk"))
         }
 
-        // 5) Summary
+        // 5) Segments sheet
+        var segmentGroups: [SegmentGroup] = []
+        if config.segments {
+            if config.dryRun {
+                segmentGroups = SegmentExtractor.extract(facts: filing.segmentFacts,
+                                                         periods: filing.facts.annualPeriods(latest: filing.period, count: 3))
+                if !segmentGroups.isEmpty {
+                    log(.log("Segmenty: \(segmentGroups.map { "\($0.title) \($0.lines.count)" }.joined(separator: ", ")) – při zápisu se přegeneruje list „\(SegmentSheet.title)“"))
+                }
+            } else {
+                do { segmentGroups = try await rebuildSegments(filing: filing, sheets: sheets, log: log) }
+                catch { log(.log("⚠︎ List Segments se nepodařilo zapsat: \(error.localizedDescription)")) }
+            }
+        }
+
+        // 6) Summary
         let summary = try await summarize(filing: filing, sheets: sheets, write: !config.dryRun, log: log)
         return Report(filing: filing, rows: rows, checks: checks, backtest: backtest, plan: plan,
-                      newColumns: sheetPlan.newColumns, written: written, summary: summary)
+                      newColumns: sheetPlan.newColumns, written: written, summary: summary, segmentGroups: segmentGroups)
     }
 
     func backtest(prior: FiscalPeriod, filing: PreparedFiling, sheets: GoogleSheetsClient) async throws -> [ColumnDifference] {

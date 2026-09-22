@@ -9,6 +9,7 @@ public extension FinFillPipeline {
         public let years: [WorkbookFiller.YearResult]
         public let written: Int
         public let summary: Summarizer.Result?
+        public let segmentGroups: [SegmentGroup]
     }
 
     /// Creates a new Google Sheets workbook from `template` (statements + DCF + WACC with formulas
@@ -25,10 +26,31 @@ public extension FinFillPipeline {
         let periods = filing.facts.annualPeriods(latest: filing.period, count: yc.count)
         log(.log("Roky v datech SEC: \(periods.map { String($0.fiscalYear) }.reversed().joined(separator: ", "))"))
 
+        // Segments of all years (older 10-Ks downloaded) before the workbook exists.
+        var groups: [SegmentGroup] = []
+        var yearColumns: [Int: Int] = [:]
+        for i in 0..<yc.count { yearColumns[firstYear + i] = yc.first + i }
+        if config.segments {
+            let facts = await segmentHistory(filing: filing, years: firstYear...filing.period.fiscalYear, log: log)
+            groups = SegmentExtractor.extract(facts: facts, periods: periods)
+        }
+
         // 1) Workbook with formulas and formatting.
         let ticker = config.ticker.uppercased()
         let name = title ?? "\(ticker) Valuation FY\(filing.period.fiscalYear)"
-        let created = try await GoogleSheetsClient.create(body: TemplateRequests.createBody(template, title: name), tokens: tokens)
+        var body = TemplateRequests.createBody(template, title: name)
+        let segmentsId = 777_001
+        if !groups.isEmpty, var list = body["sheets"] as? [[String: Any]] {
+            let size = SegmentSheet.gridSize(groups: groups, yearColumns: yearColumns)
+            let isIndex = template.sheets.firstIndex { $0.title == "IncomeStatement" }.map { $0 + 1 } ?? list.count
+            list.insert(["properties": [
+                "sheetId": segmentsId, "title": SegmentSheet.title, "index": isIndex,
+                "gridProperties": ["rowCount": size.rows, "columnCount": size.columns, "hideGridlines": true],
+            ] as [String: Any]], at: isIndex)
+            for i in list.indices { if var p = list[i]["properties"] as? [String: Any] { p["index"] = i; list[i]["properties"] = p } }
+            body["sheets"] = list
+        }
+        let created = try await GoogleSheetsClient.create(body: body, tokens: tokens)
         log(.log("Vytvořen sešit „\(name)“"))
         let sheets = GoogleSheetsClient(spreadsheetID: created.spreadsheetID, tokens: tokens)
         let today = Calendar(identifier: .gregorian).dateComponents([.year, .month, .day], from: Date())
@@ -54,9 +76,15 @@ public extension FinFillPipeline {
         if !cells.isEmpty { try await sheets.batchUpdate(cells) }
         log(.log("Zapsáno \(cells.count) buněk"))
 
+        if !groups.isEmpty {
+            let id = created.sheetIds[SegmentSheet.title] ?? segmentsId
+            try await sheets.structuralUpdate(SegmentSheet.updateCells(sheetId: id, groups: groups, yearColumns: yearColumns))
+            log(.log("List „\(SegmentSheet.title)“: \(groups.map { "\($0.title) \($0.lines.count)" }.joined(separator: ", "))"))
+        }
+
         // 3) Summary of the latest 10-K.
         let summary = try await summarize(filing: filing, sheets: sheets, write: true, log: log)
         return NewWorkbookReport(spreadsheetID: created.spreadsheetID, url: created.url, title: name, filing: filing,
-                                 years: plan.years, written: cells.count, summary: summary)
+                                 years: plan.years, written: cells.count, summary: summary, segmentGroups: groups)
     }
 }

@@ -64,6 +64,15 @@ do {
         let checks = Validator.reconcile(mapping, rows: &rows, facts: filing.facts, period: filing.period)
         printRows(rows, column: col, title: "FY\(filing.period.fiscalYear) → column \(col)")
         printChecks(checks)
+        if let out = opt("--emit-segments") {
+            let periods = filing.facts.annualPeriods(latest: filing.period, count: 9)
+            let groups = SegmentExtractor.extract(facts: filing.segmentFacts, periods: periods)
+            var yc: [Int: Int] = [:]
+            for i in 0..<9 { yc[filing.period.fiscalYear - 8 + i] = 6 + i }
+            let req = SegmentSheet.updateCells(sheetId: 1, groups: groups, yearColumns: yc)
+            try JSONSerialization.data(withJSONObject: req[0], options: [.prettyPrinted]).write(to: URL(fileURLWithPath: out))
+            for g in groups { print(g.title, g.lines.map { ($0.parent == nil ? "" : "  ") + $0.name }) }
+        }
         if flag("--all-years"), let out = opt("--emit-json") {
             // Same as a new workbook from the universal template: 9 years ending with this 10-K in G..O.
             let periods = filing.facts.annualPeriods(latest: filing.period, count: 9)

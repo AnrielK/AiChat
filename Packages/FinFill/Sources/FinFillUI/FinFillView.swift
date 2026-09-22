@@ -89,6 +89,7 @@ public struct FinFillView: View {
                 Text("NVDA (segmenty)").tag(FinFillViewModel.MappingKind.nvda)
             }
             Toggle("Přepsat neprázdné buňky", isOn: $model.overwrite)
+            Toggle("List Segments (segmenty, trhy, regiony + meziroční změna)", isOn: $model.segments)
             Toggle("Souhrn modelem", isOn: $model.summarize)
                 .disabled(!model.hasEngine)
             Picker("Jazyk souhrnu", selection: $model.language) {
@@ -149,6 +150,23 @@ public struct FinFillView: View {
                 Text("Nové sloupce")
             } footer: {
                 Text("Při zápisu se vloží sloupec za předchozí rok a zkopíruje se do něj předchozí sloupec i se vzorci a formátem. Ručně zadaná čísla minulého roku se vymažou a vyplní se nová.")
+            }
+        }
+
+        if !r.segmentGroups.isEmpty {
+            Section {
+                ForEach(r.segmentGroups) { g in
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(g.title).font(.subheadline.bold())
+                        Text(g.lines.map { ($0.parent == nil ? "" : "↳ ") + $0.name }.joined(separator: ", "))
+                            .font(.caption).foregroundStyle(.secondary)
+                    }
+                }
+            } header: {
+                Text("Segmenty tržeb")
+            } footer: {
+                Text(r.written > 0 ? "Zapsáno na list Segments i s meziroční změnou a podílem na tržbách." :
+                        "Při zápisu se list Segments vytvoří znovu pro všechny roky v sešitu (starší roky ze starších 10-K).")
             }
         }
 
@@ -239,6 +257,9 @@ public struct FinFillView: View {
         } header: {
             Text("Nový sešit · \(w.title)")
         } footer: {
+            if !w.segmentGroups.isEmpty {
+                Text("List Segments: " + w.segmentGroups.map { "\($0.title) (\($0.lines.count))" }.joined(separator: ", ") + ". ")
+            }
             Text("Sešit je vybraný pro další práci. Roky, které SEC v datech nemá, zůstanou prázdné; ± je dorovnání do řádku „ostatní“.")
         }
     }
@@ -372,6 +393,9 @@ final class FinFillViewModel {
         didSet { UserDefaults.standard.set(mappingKind.rawValue, forKey: "finfill.mapping"); invalidate() }
     }
     var newWorkbook: FinFillPipeline.NewWorkbookReport?
+    var segments = UserDefaults.standard.object(forKey: "finfill.segments") as? Bool ?? true {
+        didSet { UserDefaults.standard.set(segments, forKey: "finfill.segments") }
+    }
 
     var isRunning = false
     var status = ""
@@ -420,6 +444,7 @@ final class FinFillViewModel {
         c.overwrite = overwrite
         c.dryRun = dryRun
         c.summaryOptions.language = language
+        c.segments = segments
         return c
     }
 

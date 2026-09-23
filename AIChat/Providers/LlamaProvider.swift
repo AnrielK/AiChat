@@ -131,6 +131,9 @@ actor LlamaEngine {
     }
 
     func unload() {
+        // Předčítání podle odhadu sahá na pozadí na stránky mmapu – musí doběhnout dřív,
+        // než llama.cpp mapování zruší.
+        prefetcher?.waitForAhead()
         releaseContext()
         if let model { llama_model_free(model) }
         model = nil
@@ -561,8 +564,8 @@ actor LlamaEngine {
             """)
         if stats.aheadExperts > 0 {
             log.notice("""
-                \(phase): podle odhadu ohlášeno \(stats.aheadExperts) expertů, \(stats.aheadBytes / 1_048_576) MB \
-                za \(decimal(stats.aheadSeconds * 1_000, digits: 0)) ms
+                \(phase): podle odhadu (na pozadí) \(stats.aheadExperts) expertů, \(stats.aheadBytes / 1_048_576) MB \
+                za \(decimal(stats.aheadSeconds * 1_000, digits: 0)) ms · výpočet předběhl \(stats.aheadLate)×
                 """)
         }
         if stats.wholeLayers > 0 {

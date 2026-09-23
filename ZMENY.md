@@ -1,3 +1,31 @@
+# MoE: předčítání podle odhadu na pozadí
+
+Log z iPhonu (Qwen3-30B-A3B, **6 z 8 expertů**, KV f16, kontext 32k, repack zapnutý, záznam zapnutý,
+666 tokenů):
+
+| odhad | tok/s | bez měření | připraveno včas | čekání v předčítání | ohlášení odhadu |
+|-------|-------|------------|-----------------|---------------------|-----------------|
+| k     | 4,39  | 4,55       | 95,1 %          | 67 ms/tok           | 34 ms/tok       |
+| k+2   | 3,85  | 3,99       | 97,4 %          | 59 ms/tok           | 57 ms/tok       |
+
+- **Odhad funguje.** Podíl vybraných expertů, kteří v okamžiku výpočtu ležel celý v paměti, vyskočil
+  z ~73 % (bez odhadu, k = 8) na 95 %. k+2 přidá jen 2,3 procentního bodu, ale čte víc a je pomalejší,
+  proto doporučuju k.
+- **Ohlášení odhadu brzdilo výpočet.** `F_RDADVISE` přímo v callbacku stálo 34 ms na token (k+2: 57 ms),
+  výpočet na něj čekal. Teď běží na sériové frontě na pozadí.
+- **Mapování stránek odhadnutých expertů také na pozadí** (druhá fronta, aby čekání na flash nezdrželo
+  ohlášení další vrstvy). V cestě výpočtu zbývalo ~60 ms na token mapování (~10 000 výpadků „jen
+  mapování“ na token). Úloha se přeruší, jakmile výpočet vrstvu předběhne; log to ukazuje jako
+  „výpočet předběhl N×“. `unload()` před uvolněním modelu počká, až úlohy doběhnou.
+- **Prefill: celá vrstva nepomáhá, nech ji vypnutou.** Sekvenční `pread` jde jen ~1,5–1,8 GB/s, ne
+  3,7 GB/s, takže prefill 52 tokenů trval 12,3–12,9 s místo 7,0–8,2 s.
+- Chybí srovnávací běh se 6 experty bez odhadu. Dřívější čísla jsou s 8 experty a s každým tokenem
+  měřeným, takže se srovnávat nedají.
+
+Swift je nepřeložený.
+
+---
+
 # MoE: předčítání podle odhadu z routeru, levnější měření, oprava mapování po GPU prefillu
 
 Podle tří záznamů v3 a logu z iPhonu (Qwen3-30B-A3B, k = 8, 650–840 tokenů na odpověď):

@@ -67,6 +67,14 @@ final class ExpertPrefetcher: @unchecked Sendable {
     /// tedy 10–18 % doby generování – záznam tím zkresloval rychlost, kterou měl měřit.
     private static let residencySampleTokens = 8
     private var decodeEvents = 0
+    /// Předčítání podle odhadu běží mimo vlákno výpočtu. `F_RDADVISE` přímo v callbacku stálo
+    /// 34 ms na token (k) a 57 ms (k+2) – výpočet na něj čekal, i když samo čtení je asynchronní.
+    private let aheadQueue = DispatchQueue(label: "cz.aichat.experts-ahead", qos: .userInitiated)
+    /// Mapování stránek zvlášť: čeká na dočtení z flash a nesmí zdržet ohlášení další vrstvy.
+    private let touchQueue = DispatchQueue(label: "cz.aichat.experts-touch", qos: .userInitiated)
+    /// Počet zpracovaných výběrů routeru při generování. Úloha na pozadí podle něj pozná,
+    /// že ji výpočet předběhl – dotýkat se stránek vrstvy, kterou už spočítal, nemá smysl.
+    private let decodeProgress = OSAllocatedUnfairLock(initialState: 0)
     /// Odhady čekající na skutečný výběr, podle vrstvy, pro kterou platí. Slovník, ne jedna
     /// hodnota: odhad pro N+1 vzniká u `ffn_inp-N`, tedy ještě před `ffn_moe_topk-N`.
     private var pendingPredictions: [Int: [Int]] = [:]
@@ -131,6 +139,8 @@ final class ExpertPrefetcher: @unchecked Sendable {
         var aheadExperts = 0
         var aheadBytes = 0
         var aheadSeconds = 0.0
+        /// Kolikrát výpočet předběhl úlohu na pozadí dřív, než stihla namapovat stránky.
+        var aheadLate = 0
         /// Kolik generovaných tokenů mělo změřenou rezidenci (vzorek, viz `residencySampleTokens`).
         var sampledTokens = 0
         var wholeLayers = 0
@@ -291,19 +301,30 @@ final class ExpertPrefetcher: @unchecked Sendable {
         }
         pendingPredictions[layer + 1] = ranked
         if let speculativeExtra, readEnabled, !splitOnly, !useReadFallback {
-            adviseAhead(layer: layer + 1, experts: Array(ranked.prefix(max(1, activeExperts) + speculativeExtra)))
+            scheduleAhead(layer: layer + 1, experts: Array(ranked.prefix(max(1, activeExperts) + speculativeExtra)))
         }
     }
 
-    /// Ohlásí jádru experty další vrstvy podle odhadu – jen `F_RDADVISE`, bez čekání a bez
-    /// dotyku stránek. Čtení tak běží souběžně s MoE této vrstvy a attention další. Stránky,
-    /// které už v cache jsou, jádro přeskočí. Když router pak vybere jiné experty, dočtou se
-    /// běžnou cestou v `handle`; ty trefené tam najdou stránky načtené nebo rozjeté.
-    private func adviseAhead(layer: Int, experts: [Int]) {
+    /// Počká, až doběhne předčítání podle odhadu. Volat před uvolněním modelu – úloha
+    /// na pozadí sahá na stránky mmapu llama.cpp.
+    func waitForAhead() {
+        aheadQueue.sync {}
+        touchQueue.sync {}
+    }
+
+    /// Předčte experty další vrstvy podle odhadu – na pozadí, výpočet na to nečeká.
+    ///
+    /// 1. `F_RDADVISE` na rozsahy odhadnutých expertů – čtení z flash běží souběžně s MoE této
+    ///    vrstvy a attention další. Stránky, které už v cache jsou, jádro přeskočí.
+    /// 2. S „Mapovat stránky předem“ se na stránky i sáhne (přes mmap llama.cpp), takže je
+    ///    výpočet najde namapované. Mapování v cestě výpočtu stálo ~60 ms na token
+    ///    (~10 000 výpadků „jen mapování“ po ~6 µs). Přeskočí se, jakmile výpočet vrstvu předběhne.
+    ///
+    /// Když router vybere jiné experty, dočtou se běžnou cestou v `handle`.
+    private func scheduleAhead(layer: Int, experts: [Int]) {
         guard let tensors = layers[layer], !experts.isEmpty else { return }
-        let start = Date.now
         let sorted = experts.sorted()
-        var bytes = 0
+        var ranges: [(offset: Int, bytes: Int)] = []
         for expertTensor in tensors {
             let slice = expertTensor.bytes / expertCount
             guard slice > 0 else { continue }
@@ -311,20 +332,45 @@ final class ExpertPrefetcher: @unchecked Sendable {
             while index < sorted.count {
                 var end = index
                 while end + 1 < sorted.count, sorted[end + 1] == sorted[end] + 1 { end += 1 }
-                let length = (end - index + 1) * slice
-                var advice = radvisory(ra_offset: off_t(expertTensor.fileOffset + sorted[index] * slice),
-                                       ra_count: Int32(clamping: length))
-                _ = fcntl(fd, F_RDADVISE, &advice)
-                bytes += length
+                ranges.append((expertTensor.fileOffset + sorted[index] * slice, (end - index + 1) * slice))
                 index = end + 1
             }
         }
-        let elapsed = Date.now.timeIntervalSince(start)
-        let announced = bytes
-        stats.withLock {
-            $0.aheadExperts += experts.count
-            $0.aheadBytes += announced
-            $0.aheadSeconds += elapsed
+        let all = ranges
+        let count = experts.count
+        // Mmap llama.cpp, ne vlastní: dvojí mapování se při generování nevyplácí (viz `ownMapMinBatch`).
+        // Adresa jako číslo: ukazatel není Sendable a úloha jde do jiného vlákna.
+        let baseAddress = prefaultPages ? mappingBase.map { Int(bitPattern: $0) } : nil
+        // Tahle vrstva je teď `N`; výběr routeru pro ni přijde jako další, pro N+1 jako ten po něm.
+        // Až výpočet výběr pro N+1 zpracuje, je na dotyk pozdě.
+        let deadline = decodeProgress.withLock { $0 } + 2
+        let fd = self.fd
+        aheadQueue.async { [self] in
+            let start = Date.now
+            var bytes = 0
+            for range in all {
+                var advice = radvisory(ra_offset: off_t(range.offset), ra_count: Int32(clamping: range.bytes))
+                _ = fcntl(fd, F_RDADVISE, &advice)
+                bytes += range.bytes
+            }
+            let elapsed = Date.now.timeIntervalSince(start)
+            let announced = bytes
+            stats.withLock {
+                $0.aheadExperts += count
+                $0.aheadBytes += announced
+                $0.aheadSeconds += elapsed
+            }
+            guard let baseAddress else { return }
+            touchQueue.async { [self] in
+                guard let base = UnsafeRawPointer(bitPattern: baseAddress) else { return }
+                for range in all {
+                    if decodeProgress.withLock({ $0 }) >= deadline {
+                        stats.withLock { $0.aheadLate += 1 }
+                        return
+                    }
+                    Self.touchPages(base + range.offset, bytes: range.bytes)
+                }
+            }
         }
     }
 
@@ -338,6 +384,7 @@ final class ExpertPrefetcher: @unchecked Sendable {
         guard let layer = layerIndex(tensor), let tensors = layers[layer],
               let selected = selectedExperts(tensor), !selected.isEmpty else { return }
         let batchTokens = Int(tensor.pointee.ne.1)
+        if batchTokens == 1 { decodeProgress.withLock { $0 += 1 } }
 
         // Záznam a zásah cache – musí se změřit před předčtením, jinak by vyšel vždy 100 %.
         // Odhad pro tuhle vrstvu (udělaný o vrstvu dřív) platí jen jednou – pak se zahodí.

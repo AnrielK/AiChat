@@ -214,8 +214,10 @@ struct LocalModelSettings: Codable, Equatable, Sendable {
     /// Předčítat experty další vrstvy podle odhadu z jejího routeru (`RouterPredictor`):
     /// 0 = vypnuto, 1 = k expertů, 2 = k+2, 3 = k o jednu i o dvě vrstvy dopředu. Záznamy z iPhonu (Qwen3-30B-A3B, 3 × ~800 tokenů):
     /// odhad s k experty trefí 81 % expertů chybějících v cache a zbytečně přečte ~24 %
-    /// nutného čtení; k+2 trefí 90 % za 56–59 %. Výchozí vypnuto, dokud to nezměří iPhone.
-    var prefetchAhead = 0
+    /// nutného čtení; k+2 trefí 90 % za 56–59 %. Měření (6 expertů, 3 vlákna, stejný dotaz):
+    /// bez odhadu 4,32 tok/s, s k 4,72 tok/s. k+2 i „dvě vrstvy“ byly pomalejší než k
+    /// (zbytečné čtení bere propustnost flash) – proto je výchozí k.
+    var prefetchAhead = 1
     /// Zaznamenávat, které experty router vybírá, a měřit zásah page cache (`mincore`).
     /// Záznam jde v Parametrech přehrát v simulátoru cache (`ExpertCacheSimulator`) nebo na
     /// počítači nástrojem `tools/expert_cache_sim.py`. Diagnostika, proto mimo předvolby.
@@ -399,7 +401,7 @@ extension LocalModelSettings {
             preset.prefaultPages = true
             preset.prefetchWaveMB = 0
             preset.prefillWholeLayerPercent = 0
-            preset.prefetchAhead = 0
+            preset.prefetchAhead = 1
             preset.prefetchSplitOnly = false
             preset.repackDense = true
             preset.streamingGPU = false

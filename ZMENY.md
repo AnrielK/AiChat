@@ -1,3 +1,24 @@
+# MoE: výchozí předčítání podle odhadu = k
+
+Srovnávací běhy z iPhonu (6 expertů, bez záznamu, mapování stránek vypnuté, stejný dotaz, 748 tokenů):
+
+| nastavení                    | tok/s | ms/token | ohlášeno odhadem na token |
+|------------------------------|-------|----------|---------------------------|
+| k, 4 vlákna                  | 4,31  | 232      | 786 MB                    |
+| k + dvě vrstvy, 4 vlákna     | 3,91  | 256      | 894 MB                    |
+| k, 3 vlákna (08:38, bez času měření) | 4,72 | ~212 | –                  |
+
+- **Dvě vrstvy dopředu jsou o 9 % pomalejší než k.** Víc zbytečného čtení (+14 % ohlášených dat) a víc práce
+  na pozadí sebere víc, než delší náskok dá. Stejně dopadla varianta k+2. Volba zůstává pro pokusy.
+- **4 vlákna jsou pomalejší než 3** (4,31 proti ~4,7 tok/s). Na iPhonu s 2 výkonnými a 4 úspornými jádry
+  si čtvrté vlákno výpočtu konkuruje s frontami na pozadí. Nechat 3.
+- **Výchozí `prefetchAhead` = k** (i v předvolbě GGUF MoE): proti vypnutému odhadu +9–12 %.
+
+Doporučené nastavení pro Qwen3-30B-A3B na iPhonu s 8 GB: 3 vlákna, přebalení husté části zapnuté,
+GPU prefill vypnutý, předčítat podle odhadu k, prefill po celých vrstvách vypnutý, záznam vypnutý.
+
+---
+
 # MoE: předčítání o dvě vrstvy dopředu
 
 Záznam v4 z iPhonu (6 expertů, bez předčítání podle odhadu, 666 tokenů, page cache 78 %):

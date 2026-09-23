@@ -1,3 +1,23 @@
+# MoE: odhad expertů i pro Qwen3.5/3.6 MoE (Qwen3.6-35B-A3B)
+
+llama.cpp u architektury `qwen35moe` (a `qwen3next`) nemá `ffn_norm`. Norma před MoE je uložená jako
+`blk.N.post_attention_norm` a v grafu je vidět jen její výstup `attn_post_norm-N`; uzel `ffn_inp` tu
+není. Odhad expertů se proto dřív vypnul („router nejde načíst“).
+
+- `GGUFLayout` pro tyto architektury vezme `post_attention_norm` jako normu před MoE a nastaví
+  `moeInputNode = "attn_post_norm"` a `moeInputNormalized = true`. U ostatních architektur zůstává
+  `ffn_norm` a `ffn_inp`. `post_attention_norm` jinde znamená něco jiného (např. u Gemmy normu výstupu
+  attention), proto jen pro vyjmenované architektury.
+- `RouterPredictor.predict(…, normalizedBy:)`: normovaný vstup `x/rms(x) ⊙ w_L` se vydělí `w_L`
+  a zbyde `x/rms(x)`. Kladné měřítko pořadí expertů nemění, takže odhad je stejný jako ze surového `x`.
+  Router L+1 má složenou svou normu jako dřív. Složky s nulovou vahou normy vypadnou.
+- `ExpertPrefetcher` si o uzel říká podle `moeInputNode`.
+
+Neověřeno na iPhonu. Po načtení Qwen3.6 by v logu mělo být „odhad expertů: routery 40 vrstev načteny“.
+Přesnost ukáže záznam (se záznamem a bez předčítání podle odhadu).
+
+---
+
 # MoE: výchozí předčítání podle odhadu = k
 
 Srovnávací běhy z iPhonu (6 expertů, bez záznamu, mapování stránek vypnuté, stejný dotaz, 748 tokenů):
@@ -6,13 +26,15 @@ Srovnávací běhy z iPhonu (6 expertů, bez záznamu, mapování stránek vypnu
 |------------------------------|-------|----------|---------------------------|
 | k, 4 vlákna                  | 4,31  | 232      | 786 MB                    |
 | k + dvě vrstvy, 4 vlákna     | 3,91  | 256      | 894 MB                    |
-| k, 3 vlákna (08:38, bez času měření) | 4,72 | ~212 | –                  |
+| **k, 3 vlákna, bez záznamu (11:52)** | **5,17** | **194** | 767 MB     |
 
 - **Dvě vrstvy dopředu jsou o 9 % pomalejší než k.** Víc zbytečného čtení (+14 % ohlášených dat) a víc práce
   na pozadí sebere víc, než delší náskok dá. Stejně dopadla varianta k+2. Volba zůstává pro pokusy.
-- **4 vlákna jsou pomalejší než 3** (4,31 proti ~4,7 tok/s). Na iPhonu s 2 výkonnými a 4 úspornými jádry
+- **4 vlákna jsou pomalejší než 3** (4,31 proti 5,17 tok/s, ověřeno během bez záznamu). Na iPhonu s 2 výkonnými a 4 úspornými jádry
   si čtvrté vlákno výpočtu konkuruje s frontami na pozadí. Nechat 3.
-- **Výchozí `prefetchAhead` = k** (i v předvolbě GGUF MoE): proti vypnutému odhadu +9–12 %.
+- **Výchozí `prefetchAhead` = k** (i v předvolbě GGUF MoE). Bez záznamu 5,17 tok/s proti 4,32 bez odhadu
+  (6 expertů, 3 vlákna), tedy +20 %. Předčítání ve vlákně výpočtu zabere 22 ms z 194 ms na token,
+  zbytek je výpočet a výpadky stránek.
 
 Doporučené nastavení pro Qwen3-30B-A3B na iPhonu s 8 GB: 3 vlákna, přebalení husté části zapnuté,
 GPU prefill vypnutý, předčítat podle odhadu k, prefill po celých vrstvách vypnutý, záznam vypnutý.

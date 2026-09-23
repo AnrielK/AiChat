@@ -37,6 +37,15 @@ struct GGUFLayout: Sendable, Equatable {
     /// Routery MoE (`blk.N.ffn_gate_inp.weight`) podle vrstvy. Slouží k odhadu expertů další
     /// vrstvy dřív, než se k ní výpočet dostane (`ExpertPrefetcher`, záznam trace).
     let routerTensors: [Int: RouterTensor]
+    /// Uzel grafu llama.cpp se vstupem MoE, ze kterého se odhadují experti další vrstvy:
+    /// `ffn_inp` (reziduální proud, Qwen3 MoE) nebo `attn_post_norm` (už normovaný vstup –
+    /// Qwen3.5/3.6 MoE a Qwen3-Next, které `ffn_norm` nemají a normu před MoE počítají
+    /// jako `post_attention_norm`).
+    let moeInputNode: String
+    /// Vstup z `moeInputNode` je už vynásobený normou své vrstvy – odhad ji musí nejdřív vydělit.
+    let moeInputNormalized: Bool
+    /// Architektury, kde je norma před MoE uložená jako `post_attention_norm`.
+    static let postNormArchitectures: Set<String> = ["qwen35moe", "qwen3next"]
 
     struct RouterTensor: Sendable, Equatable {
         /// Absolutní offset v souboru.
@@ -143,6 +152,8 @@ struct GGUFLayout: Sendable, Equatable {
         var denseMatrices: [DenseMatrix] = []
         var routerTensors: [Int: RouterTensor] = [:]
         var normTensors: [Int: NormTensor] = [:]
+        var postNormTensors: [Int: NormTensor] = [:]
+        let architecture = string(context, "general.architecture") ?? ""
         let dataOffset = Int(gguf_get_data_offset(context))
         for index in 0..<gguf_get_n_tensors(context) {
             let bytes = Int(gguf_get_tensor_size(context, index))
@@ -155,12 +166,14 @@ struct GGUFLayout: Sendable, Equatable {
                     expertTensors[layer, default: []].append(ExpertTensor(name: name, fileOffset: offset, bytes: bytes))
                 }
             } else if !name.hasPrefix("token_embd.") {
-                if name.hasSuffix(".ffn_norm.weight"), let layer = layerIndex(name) {
-                    normTensors[layer] = NormTensor(
+                if name.hasSuffix(".ffn_norm.weight") || name.hasSuffix(".post_attention_norm.weight"),
+                   let layer = layerIndex(name) {
+                    let norm = NormTensor(
                         fileOffset: dataOffset + Int(gguf_get_tensor_offset(context, index)),
                         bytes: bytes,
                         type: gguf_get_tensor_type(context, index).rawValue
                     )
+                    if name.hasSuffix(".ffn_norm.weight") { normTensors[layer] = norm } else { postNormTensors[layer] = norm }
                 }
                 if name.hasSuffix(".ffn_gate_inp.weight"), let layer = layerIndex(name), let tensorContext,
                    let meta = ggml_get_tensor(tensorContext, name), meta.pointee.ne.2 == 1, meta.pointee.ne.3 == 1 {
@@ -189,14 +202,20 @@ struct GGUFLayout: Sendable, Equatable {
             }
         }
 
+        // Qwen3.5/3.6 MoE nemá `ffn_norm`: norma před MoE je `post_attention_norm` a v grafu
+        // je její výstup jako `attn_post_norm-N` (reziduální vstup tam pojmenovaný není).
+        // U jiných architektur `post_attention_norm` znamená normu výstupu attention – proto
+        // jen pro vyjmenované architektury.
+        let postNorm = normTensors.isEmpty && !postNormTensors.isEmpty
+            && postNormArchitectures.contains(architecture)
+        let moeNorms = postNorm ? postNormTensors : normTensors
         for (layer, router) in routerTensors {
             routerTensors[layer] = RouterTensor(
                 fileOffset: router.fileOffset, bytes: router.bytes, type: router.type,
-                embedding: router.embedding, experts: router.experts, norm: normTensors[layer]
+                embedding: router.embedding, experts: router.experts, norm: moeNorms[layer]
             )
         }
 
-        let architecture = string(context, "general.architecture") ?? ""
         let layout = GGUFLayout(
             totalBytes: total,
             expertBytes: experts,
@@ -207,7 +226,9 @@ struct GGUFLayout: Sendable, Equatable {
             gpuBytes: gpuBytes,
             expertTensors: expertTensors,
             denseMatrices: denseMatrices,
-            routerTensors: routerTensors
+            routerTensors: routerTensors,
+            moeInputNode: postNorm ? "attn_post_norm" : "ffn_inp",
+            moeInputNormalized: postNorm
         )
         cache.set(layout, for: key)
         return layout

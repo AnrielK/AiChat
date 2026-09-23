@@ -36,8 +36,11 @@ final class ExpertPrefetcher: @unchecked Sendable {
     /// krátké, protože jde o jednotky expertů, takže se dvojí mapování nemá z čeho zaplatit.
     private static let ownMapMinBatch = 32
     private static let topkPrefix = Array("ffn_moe_topk-".utf8CString.dropLast())
-    /// Reziduální vstup MoE vrstvy (`ffn_inp-N`) – z něj se odhadují experti vrstvy N+1.
-    private static let hiddenPrefix = Array("ffn_inp-".utf8CString.dropLast())
+    /// Vstup MoE vrstvy (`ffn_inp-N`, u Qwen3.5/3.6 `attn_post_norm-N`) – z něj se odhadují
+    /// experti vrstvy N+1. Viz `GGUFLayout.moeInputNode`.
+    private let hiddenPrefix: [CChar]
+    /// `hiddenPrefix` je už normovaný svou vrstvou – odhad ji vydělí (`RouterPredictor.predict`).
+    private let hiddenNormalized: Bool
 
     private let fd: Int32
     private let path: String
@@ -169,6 +172,8 @@ final class ExpertPrefetcher: @unchecked Sendable {
         self.layers = layout.expertTensors
         self.expertCount = layout.expertCount
         self.routers = layout.routerTensors
+        self.hiddenPrefix = Array("\(layout.moeInputNode)-".utf8CString.dropLast())
+        self.hiddenNormalized = layout.moeInputNormalized
         self.activeExperts = layout.expertUsed
         var offsets: [String: Int] = [:]
         for tensor in layout.expertTensors.values.joined() { offsets[tensor.name] = tensor.fileOffset }
@@ -286,7 +291,7 @@ final class ExpertPrefetcher: @unchecked Sendable {
     /// u prefillu by odhad stál víc, než kolik by řekl.
     fileprivate func wantsHidden(_ tensor: UnsafeMutablePointer<ggml_tensor>) -> Bool {
         predictor != nil && (traceWriter != nil || speculativeExtra != nil) && tensor.pointee.ne.1 == 1
-            && tensor.pointee.type == GGML_TYPE_F32 && Self.hasPrefix(tensor, Self.hiddenPrefix)
+            && tensor.pointee.type == GGML_TYPE_F32 && Self.hasPrefix(tensor, hiddenPrefix)
     }
 
     private static func hasPrefix(_ tensor: UnsafeMutablePointer<ggml_tensor>, _ prefix: [CChar]) -> Bool {
@@ -297,7 +302,7 @@ final class ExpertPrefetcher: @unchecked Sendable {
 
     /// Ze vstupu MoE vrstvy N odhadne experty vrstvy N+1 (seřazené podle skóre).
     fileprivate func predictNext(_ tensor: UnsafeMutablePointer<ggml_tensor>) {
-        guard let predictor, let layer = Self.layerNumber(tensor, prefix: Self.hiddenPrefix),
+        guard let predictor, let layer = Self.layerNumber(tensor, prefix: hiddenPrefix),
               predictor.canPredict(layer: layer + 1),
               Int(tensor.pointee.ne.0) == predictor.embedding, tensor.pointee.buffer != nil else { return }
         let bytes = predictor.embedding * MemoryLayout<Float>.size
@@ -306,9 +311,13 @@ final class ExpertPrefetcher: @unchecked Sendable {
         // takže stačí stejný vstup.
         let secondLayer = (traceWriter != nil || twoLayersAhead) && predictor.canPredict(layer: layer + 2)
             ? layer + 2 : nil
+        let normalized = hiddenNormalized
         let predictBoth = { (hidden: UnsafePointer<Float>) -> ([Int], [Int]?) in
-            let first = predictor.predict(layer: layer + 1, hidden: hidden, count: count)
-            let second = secondLayer.map { predictor.predict(layer: $0, hidden: hidden, count: count) }
+            let source = normalized ? layer : nil
+            let first = predictor.predict(layer: layer + 1, hidden: hidden, count: count, normalizedBy: source)
+            let second = secondLayer.map {
+                predictor.predict(layer: $0, hidden: hidden, count: count, normalizedBy: source)
+            }
             return (first, second)
         }
         let result: ([Int], [Int]?)

@@ -219,6 +219,12 @@ enum ExpertCacheSimulator {
             ("router L+1, k+4", { $0 + 4 }),
             ("router L+1, 2k", { 2 * $0 }),
         ]
+        let depths2: [(label: String, extra: (Int) -> Int)] = [
+            ("router L+2", { $0 }),
+            ("router L+2, k+2", { $0 + 2 }),
+            ("router L+2, 2k", { 2 * $0 }),
+        ]
+        let unionLabel = "router L+1 ∪ L+2"
         var guesses: [String: Guess] = [:]
         var previous: [Int: Set<UInt16>] = [:]
         for event in trace.events where event.isDecode {
@@ -227,7 +233,7 @@ enum ExpertCacheSimulator {
             let k = actual.count
             let before = previous[event.layer]
             let resident = event.residentSet
-            let known = Set(event.predicted)
+            let known = Set(event.predicted).union(event.predicted2)
             if let before {
                 guesses[previousLabel, default: Guess()].add(
                     actual: actual, guess: before, size: size, resident: resident, known: known)
@@ -246,9 +252,24 @@ enum ExpertCacheSimulator {
                         resident: resident, known: known)
                 }
             }
+            if !event.predicted2.isEmpty {
+                for depth in depths2 {
+                    let count = depth.extra(k)
+                    guard count <= event.predicted2.count else { continue }
+                    guesses[depth.label, default: Guess()].add(
+                        actual: actual, guess: Set(event.predicted2.prefix(count)), size: size,
+                        resident: resident, known: known)
+                }
+                if !event.predicted.isEmpty {
+                    guesses[unionLabel, default: Guess()].add(
+                        actual: actual, guess: Set(event.predicted.prefix(k)).union(event.predicted2.prefix(k)),
+                        size: size, resident: resident, known: known)
+                }
+            }
             previous[event.layer] = actual
         }
         let order = [previousLabel] + depths.map { $0.label } + [combinedLabel]
+            + depths2.map { $0.label } + [unionLabel]
         return order.compactMap { label in
             guard let guess = guesses[label], guess.needed > 0 else { return nil }
             return PredictionRow(

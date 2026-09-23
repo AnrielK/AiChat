@@ -223,7 +223,7 @@ struct ExpertTraceDetailView: View {
             Text("""
                 Kdyby šlo experty poznat dřív, než je router vybere, čtení z flash by běželo souběžně s výpočtem místo čekání. Trefí = podíl potřebných bajtů, které by odhad načetl dopředu. Navíc = zbytečně přečtené bajty vůči potřebným (100 % = dvojnásobné čtení).
 
-                Minulý token: experti stejné vrstvy z předchozího tokenu. Router L+1: router další vrstvy vynásobený skrytým stavem vrstvy L – odhad o vrstvu dřív; k+2, k+4 a 2k je odhad o pár expertů delší (víc trefí, víc čte zbytečně). Poslední řádek je sjednocení obou.
+                Minulý token: experti stejné vrstvy z předchozího tokenu. Router L+1: router další vrstvy vynásobený skrytým stavem vrstvy L – odhad o vrstvu dřív; k+2, k+4 a 2k je odhad o pár expertů delší (víc trefí, víc čte zbytečně). Router L+2: odhad o dvě vrstvy dřív – čtení má dvojnásobný náskok, ale odhad je méně přesný. L+1 ∪ L+2: experti z obou odhadů.
 
                 Výpadky a čtení navíc (záznam s rezidencí po expertech): trefí a navíc počítají se všemi experty, i s těmi, kteří už v cache leží a předčítání nepotřebují. Skutečný přínos je sloupec výpadky – kolik expertů, kteří v cache chyběli, by odhad načetl dopředu. Čtení navíc je, kolik by odhad přečetl z flash zbytečně, vůči čtení, které je nutné tak jako tak. Experti z minulého tokenu jsou skoro vždy v cache, proto u nich výpadky vycházejí kolem nuly.
 

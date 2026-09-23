@@ -1,3 +1,27 @@
+# MoE: měření odhadu o dvě vrstvy dopředu
+
+Srovnávací běhy z iPhonu (Qwen3-30B-A3B, 6 expertů, stejný dotaz, 666 tokenů, se záznamem):
+
+| mapovat stránky předem | odhad | tok/s | bez měření | připraveno včas |
+|------------------------|-------|-------|------------|-----------------|
+| ano                    | vyp   | 4,12  | 4,23       | 78,5 %          |
+| ano                    | k     | 4,48  | 4,74       | 94,4 %          |
+| ne                     | vyp   | 4,20  | 4,32       | 79,0 %          |
+| ne                     | k     | 4,48  | 4,72       | 94,9 %          |
+
+- Předčítání podle odhadu (k) zrychlí generování o 9–12 %. Předmapování stránek teď nemá vliv.
+- S předmapováním výpočet předběhl úlohu na pozadí v 7 329 z 31 968 vrstev (23 %), takže jedna
+  vrstva náskoku na dočtení často nestačí.
+
+Proto se se zapnutým záznamem u `ffn_inp-L` odhaduje i vrstva L+2 (router L+2 má složenou vlastní
+normu, vstup je stejný). Odhad jde do **záznamu v4** (`predicted2`, příznak bit 2) a simulace ho
+vyhodnotí v řádcích „router L+2“ (k, k+2, 2k) a „router L+1 ∪ L+2“. Podle odhadu L+2 se zatím nečte.
+Bez záznamu se L+2 nepočítá. Záznamy v1–v3 se dál čtou.
+
+Swift je nepřeložený. Python nástroj je ověřený na syntetickém záznamu v4 i na starších záznamech.
+
+---
+
 # MoE: předčítání podle odhadu na pozadí
 
 Log z iPhonu (Qwen3-30B-A3B, **6 z 8 expertů**, KV f16, kontext 32k, repack zapnutý, záznam zapnutý,

@@ -17,6 +17,7 @@ Politiky:
 Navíc vyhodnotí, jak dobře jde experty předpovídat (čtení by pak běželo souběžně s výpočtem):
   minulý token  experti stejné vrstvy z předchozího tokenu
   router L+1    odhad z routeru další vrstvy nad skrytým stavem vrstvy L (záznam verze 2)
+  router L+2    odhad o dvě vrstvy dopředu – delší náskok, nižší přesnost (záznam verze 4)
 a pokrytí vrstev při prefillu – od jakého podílu je levnější přečíst celou vrstvu naráz.
 
 Nepotřebuje žádné balíčky.
@@ -46,6 +47,7 @@ class Event:
     resident: int | None
     experts: list[int]
     predicted: list[int] = field(default_factory=list)
+    predicted2: list[int] = field(default_factory=list)
     resident_set: set[int] | None = None  # verze 3: kteří z experts/predicted leželi v cache
 
 
@@ -64,7 +66,7 @@ def read_trace(path: str) -> Trace:
     if data[:4] != MAGIC:
         sys.exit(f"{path}: není záznam expertů (.axtr)")
     version, expert_count, layer_count, flags = struct.unpack_from("<4H", data, 4)
-    if version not in (1, 2, 3):
+    if version not in (1, 2, 3, 4):
         sys.exit(f"{path}: nepodporovaná verze {version}")
     offset = 12
     slices = list(struct.unpack_from(f"<{layer_count}I", data, offset))
@@ -75,26 +77,32 @@ def read_trace(path: str) -> Trace:
     offset += name_length
 
     events: list[Event] = []
-    head = 8 if version == 1 else 10
+    head = 8 if version == 1 else 10 if version < 4 else 12
     while offset + head <= len(data):
         layer, tokens, count, resident = struct.unpack_from("<4H", data, offset)
         predicted_count = struct.unpack_from("<H", data, offset + 8)[0] if version >= 2 else 0
-        end = offset + head + 2 * (count + predicted_count)
+        predicted2_count = struct.unpack_from("<H", data, offset + 10)[0] if version >= 4 else 0
+        end = offset + head + 2 * (count + predicted_count + predicted2_count)
         if end > len(data):
             break  # useknutý konec
-        experts = list(struct.unpack_from(f"<{count}H", data, offset + head))
-        predicted = list(struct.unpack_from(f"<{predicted_count}H", data, offset + head + 2 * count))
+        cursor = offset + head
+        experts = list(struct.unpack_from(f"<{count}H", data, cursor))
+        cursor += 2 * count
+        predicted = list(struct.unpack_from(f"<{predicted_count}H", data, cursor))
+        cursor += 2 * predicted_count
+        predicted2 = list(struct.unpack_from(f"<{predicted2_count}H", data, cursor))
         offset = end
         resident_set = None
         if version >= 3:
             if resident != UNMEASURED:
-                resident_set = {e & ~RESIDENT_BIT for e in experts + predicted if e & RESIDENT_BIT}
+                resident_set = {e & ~RESIDENT_BIT for e in experts + predicted + predicted2 if e & RESIDENT_BIT}
             experts = [e & ~RESIDENT_BIT for e in experts]
             predicted = [e & ~RESIDENT_BIT for e in predicted]
-        if layer >= layer_count or any(e >= expert_count for e in experts + predicted):
+            predicted2 = [e & ~RESIDENT_BIT for e in predicted2]
+        if layer >= layer_count or any(e >= expert_count for e in experts + predicted + predicted2):
             continue
         events.append(Event(layer, tokens, None if resident == UNMEASURED else resident,
-                            experts, predicted, resident_set))
+                            experts, predicted, predicted2, resident_set))
     return Trace(expert_count, slices, name, bool(flags & 1), bool(flags & 2), events)
 
 
@@ -269,7 +277,7 @@ def prediction_stats(trace: Trace) -> dict[str, Guess]:
         k = len(actual)
         before = previous.get(event.layer)
         resident = event.resident_set
-        known = set(event.predicted)
+        known = set(event.predicted) | set(event.predicted2)
         if before is not None:
             result["minulý token"].add(actual, before, size, resident, known)
         if event.predicted:
@@ -280,8 +288,17 @@ def prediction_stats(trace: Trace) -> dict[str, Guess]:
             if before is not None:
                 result.setdefault("router L+1 + minulý token", Guess()).add(
                     actual, set(event.predicted[:k]) | before, size, resident, known)
+        if event.predicted2:
+            for label, depth in (("router L+2", k), ("router L+2, k+2", k + 2), ("router L+2, 2k", 2 * k)):
+                if depth <= len(event.predicted2):
+                    result.setdefault(label, Guess()).add(actual, set(event.predicted2[:depth]), size, resident, known)
+            if event.predicted:
+                result.setdefault("router L+1 ∪ L+2", Guess()).add(
+                    actual, set(event.predicted[:k]) | set(event.predicted2[:k]), size, resident, known)
         previous[event.layer] = actual
-    return {label: guess for label, guess in result.items() if guess.needed}
+    order = ["minulý token", "router L+1", "router L+1, k+2", "router L+1, k+4", "router L+1, 2k",
+             "router L+1 + minulý token", "router L+2", "router L+2, k+2", "router L+2, 2k", "router L+1 ∪ L+2"]
+    return {label: result[label] for label in order if label in result and result[label].needed}
 
 
 @dataclass

@@ -78,6 +78,10 @@ final class ExpertPrefetcher: @unchecked Sendable {
     /// Odhady čekající na skutečný výběr, podle vrstvy, pro kterou platí. Slovník, ne jedna
     /// hodnota: odhad pro N+1 vzniká u `ffn_inp-N`, tedy ještě před `ffn_moe_topk-N`.
     private var pendingPredictions: [Int: [Int]] = [:]
+    /// Odhady o dvě vrstvy dopředu (z `ffn_inp-N` pro vrstvu N+2) – jen do záznamu, zatím se
+    /// podle nich nečte. Mají ukázat, jestli by delší náskok vyvážil nižší přesnost: s odhadem
+    /// o vrstvu dopředu výpočet předběhl dočtení ve 23 % vrstev.
+    private var pendingPredictions2: [Int: [Int]] = [:]
     private var hiddenBuffer: [Float] = []
 
     // Statistiky jedné odpovědi (callback běží synchronně ve vlákně llama_decode).
@@ -207,6 +211,7 @@ final class ExpertPrefetcher: @unchecked Sendable {
         } else {
             predictor = nil
             pendingPredictions = [:]
+            pendingPredictions2 = [:]
         }
         if !tracing {
             traceWriter?.flush()
@@ -286,20 +291,30 @@ final class ExpertPrefetcher: @unchecked Sendable {
               predictor.canPredict(layer: layer + 1),
               Int(tensor.pointee.ne.0) == predictor.embedding, tensor.pointee.buffer != nil else { return }
         let bytes = predictor.embedding * MemoryLayout<Float>.size
-        let ranked: [Int]
         let count = min(predictor.experts, 2 * max(1, activeExperts))
+        // Odhad o dvě vrstvy dopředu jen se záznamem – router L+2 má složenou vlastní normu,
+        // takže stačí stejný vstup.
+        let secondLayer = traceWriter != nil && predictor.canPredict(layer: layer + 2) ? layer + 2 : nil
+        let predictBoth = { (hidden: UnsafePointer<Float>) -> ([Int], [Int]?) in
+            let first = predictor.predict(layer: layer + 1, hidden: hidden, count: count)
+            let second = secondLayer.map { predictor.predict(layer: $0, hidden: hidden, count: count) }
+            return (first, second)
+        }
+        let result: ([Int], [Int]?)
         if ggml_backend_buffer_is_host(tensor.pointee.buffer), let data = tensor.pointee.data {
-            ranked = predictor.predict(layer: layer + 1, hidden: data.assumingMemoryBound(to: Float.self), count: count)
+            result = predictBoth(UnsafePointer(data.assumingMemoryBound(to: Float.self)))
         } else {
             if hiddenBuffer.count < predictor.embedding {
                 hiddenBuffer = [Float](repeating: 0, count: predictor.embedding)
             }
-            ranked = hiddenBuffer.withUnsafeMutableBufferPointer { buffer in
+            result = hiddenBuffer.withUnsafeMutableBufferPointer { buffer in
                 ggml_backend_tensor_get(tensor, buffer.baseAddress!, 0, bytes)
-                return predictor.predict(layer: layer + 1, hidden: buffer.baseAddress!, count: count)
+                return predictBoth(UnsafePointer(buffer.baseAddress!))
             }
         }
+        let (ranked, ranked2) = result
         pendingPredictions[layer + 1] = ranked
+        if let secondLayer, let ranked2 { pendingPredictions2[secondLayer] = ranked2 }
         if let speculativeExtra, readEnabled, !splitOnly, !useReadFallback {
             scheduleAhead(layer: layer + 1, experts: Array(ranked.prefix(max(1, activeExperts) + speculativeExtra)))
         }
@@ -389,9 +404,11 @@ final class ExpertPrefetcher: @unchecked Sendable {
         // Záznam a zásah cache – musí se změřit před předčtením, jinak by vyšel vždy 100 %.
         // Odhad pro tuhle vrstvu (udělaný o vrstvu dřív) platí jen jednou – pak se zahodí.
         let prediction = pendingPredictions.removeValue(forKey: layer)
+        let prediction2 = pendingPredictions2.removeValue(forKey: layer)
         if let traceWriter {
             let measureStart = Date.now
             let predicted = batchTokens == 1 ? prediction ?? [] : []
+            let predicted2 = batchTokens == 1 ? prediction2 ?? [] : []
             // Vzorek: generování jen každý n-tý token (celý token, všechny vrstvy), prefill vždy.
             var sample = true
             if batchTokens == 1 {
@@ -403,9 +420,10 @@ final class ExpertPrefetcher: @unchecked Sendable {
             }
             // Měří se i odhadnutí experti: simulátor pak ví, kolik by předčítání podle odhadu
             // opravdu četlo z flash (odhad, který už v cache leží, nic nestojí).
-            let measured = sample ? residency(of: Array(Set(selected).union(predicted)), in: tensors) : nil
+            let measured = sample
+                ? residency(of: Array(Set(selected).union(predicted).union(predicted2)), in: tensors) : nil
             traceWriter.append(layer: layer, tokens: batchTokens, experts: selected,
-                               predicted: predicted, resident: measured?.resident)
+                               predicted: predicted, predicted2: predicted2, resident: measured?.resident)
             if let measured {
                 let elapsed = Date.now.timeIntervalSince(measureStart)
                 let hits = selected.filter { measured.resident.contains($0) }

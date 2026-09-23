@@ -323,7 +323,11 @@ actor LlamaEngine {
         // Callback běží i s vypnutým předčítáním, když se zaznamenává trace – pak jen měří
         // a zapisuje výběr routeru, nic nečte.
         let activePrefetcher = settings.prefetchExperts || settings.recordExpertTrace ? prefetcher : nil
-        prefetcher?.setTracing(activePrefetcher != nil && settings.recordExpertTrace)
+        // Předčítání podle odhadu z routeru jen s běžným předčítáním (bez něj nemá kdo číst).
+        let aheadExtra: Int? = settings.prefetchExperts && settings.prefetchAhead > 0
+            ? (settings.prefetchAhead >= 2 ? 2 : 0) : nil
+        prefetcher?.configure(tracing: activePrefetcher != nil && settings.recordExpertTrace,
+                              speculativeExtra: activePrefetcher != nil ? aheadExtra : nil)
         activePrefetcher?.readEnabled = settings.prefetchExperts
         // Záznam na disk i při zrušení nebo chybě – useknutá odpověď je pořád platná trace.
         defer { activePrefetcher?.flushTrace() }
@@ -333,7 +337,8 @@ actor LlamaEngine {
         activePrefetcher?.wholeLayerCoverage = Double(max(0, settings.prefillWholeLayerPercent)) / 100
         let waveNote = settings.prefaultPages && settings.prefetchWaveMB > 0
             ? " po \(settings.prefetchWaveMB) MB" : ""
-        let traceNote = settings.recordExpertTrace && activePrefetcher != nil ? " · záznam expertů" : ""
+        let traceNote = (settings.recordExpertTrace && activePrefetcher != nil ? " · záznam expertů" : "")
+            + (aheadExtra.map { " · podle odhadu \($0 == 0 ? "k" : "k+\($0)")" } ?? "")
         let prefetchMode = (activePrefetcher == nil || !settings.prefetchExperts ? "vyp"
             : settings.prefetchSplitOnly ? "jen dělení grafu"
             : settings.prefaultPages ? "zap + mapování stránek" + waveNote : "zap") + traceNote
@@ -554,6 +559,12 @@ actor LlamaEngine {
             \(megabytes) MB za \(decimal(stats.seconds)) s \
             (\(decimal(share, digits: 0)) % z \(decimal(total)) s)
             """)
+        if stats.aheadExperts > 0 {
+            log.notice("""
+                \(phase): podle odhadu ohlášeno \(stats.aheadExperts) expertů, \(stats.aheadBytes / 1_048_576) MB \
+                za \(decimal(stats.aheadSeconds * 1_000, digits: 0)) ms
+                """)
+        }
         if stats.wholeLayers > 0 {
             let wholeMB = stats.wholeLayerBytes / 1_048_576
             let rate = stats.wholeLayerSeconds > 0 ? Double(stats.wholeLayerBytes) / stats.wholeLayerSeconds / 1_073_741_824 : 0
@@ -571,10 +582,11 @@ actor LlamaEngine {
         guard stats.measuredExperts > 0 else { return }
         let hitRate = Double(stats.residentExperts) / Double(stats.measuredExperts) * 100
         let byteRate = stats.measuredBytes > 0 ? Double(stats.residentBytes) / Double(stats.measuredBytes) * 100 : 0
+        let sampleNote = stats.sampledTokens > 0 ? " · vzorek \(stats.sampledTokens) tokenů" : ""
         log.notice("""
             \(phase): zásah cache expertů \(decimal(hitRate, digits: 1)) % \
             (\(stats.residentExperts) z \(stats.measuredExperts) celých v RAM, \
-            \(decimal(byteRate, digits: 0)) % bajtů) · měření \(decimal(stats.measuredSeconds * 1_000, digits: 0)) ms
+            \(decimal(byteRate, digits: 0)) % bajtů) · měření \(decimal(stats.measuredSeconds * 1_000, digits: 0)) ms\(sampleNote)
             """)
     }
 

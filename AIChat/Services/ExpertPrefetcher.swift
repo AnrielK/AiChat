@@ -59,6 +59,14 @@ final class ExpertPrefetcher: @unchecked Sendable {
     /// Odhad expertů další vrstvy z jejího routeru – jen při záznamu (zatím se jen měří).
     private var predictor: RouterPredictor?
     private var predictorFailed = false
+    /// Předčítat experty další vrstvy podle odhadu z routeru: nil = ne, jinak kolik expertů
+    /// navíc k `activeExperts` (0 = k, 2 = k+2). Nastavuje se přes `configure`.
+    private(set) var speculativeExtra: Int?
+    /// Rezidence (`mincore`) se měří jen na každém n-tém generovaném tokenu. Měřit každý token
+    /// stálo 36–82 ms na token (u odhadu z routeru se měří ~18 expertů na vrstvu místo 8),
+    /// tedy 10–18 % doby generování – záznam tím zkresloval rychlost, kterou měl měřit.
+    private static let residencySampleTokens = 8
+    private var decodeEvents = 0
     /// Odhady čekající na skutečný výběr, podle vrstvy, pro kterou platí. Slovník, ne jedna
     /// hodnota: odhad pro N+1 vzniká u `ffn_inp-N`, tedy ještě před `ffn_moe_topk-N`.
     private var pendingPredictions: [Int: [Int]] = [:]
@@ -93,6 +101,7 @@ final class ExpertPrefetcher: @unchecked Sendable {
     /// Zjistí se z prvního `MUL_MAT_ID` uzlu, který scheduler nabídne callbacku.
     private var mappingBase: UnsafeRawPointer?
     private var baseLookupFailed = false
+    private var gpuMappingLogged = false
     /// Vlastní mapování souboru. Použije se, když adresu mmapu llama.cpp zjistit nejde –
     /// s `op_offload` jsou tenzory expertů v grafu už kopie v bufferu GPU, takže test na
     /// host buffer selže a prefaulting by se jinak vypnul úplně.
@@ -118,6 +127,12 @@ final class ExpertPrefetcher: @unchecked Sendable {
         var residentBytes = 0
         var measuredSeconds = 0.0
         /// Vrstvy prefillu přečtené celé (`wholeLayerCoverage`) a kolik to bylo bajtů.
+        /// Předčítání podle odhadu (`speculativeExtra`): ohlášení experti a bajty.
+        var aheadExperts = 0
+        var aheadBytes = 0
+        var aheadSeconds = 0.0
+        /// Kolik generovaných tokenů mělo změřenou rezidenci (vzorek, viz `residencySampleTokens`).
+        var sampledTokens = 0
         var wholeLayers = 0
         var wholeLayerBytes = 0
         var wholeLayerSeconds = 0.0
@@ -166,23 +181,29 @@ final class ExpertPrefetcher: @unchecked Sendable {
         }
     }
 
-    /// Zapne nebo vypne záznam trace. Jeden soubor na načtený model – navazující odpovědi
-    /// se připisují do stejného, protože page cache mezi nimi přetrvává a simulace to má vidět.
-    /// Volat mezi odpověďmi, ne během výpočtu.
-    func setTracing(_ enabled: Bool) {
-        if !enabled {
-            traceWriter?.flush()
-            traceWriter = nil
+    /// Nastaví záznam trace a předčítání podle odhadu. Volat mezi odpověďmi, ne během výpočtu.
+    ///
+    /// Záznam: jeden soubor na načtený model – navazující odpovědi se připisují do stejného,
+    /// protože page cache mezi nimi přetrvává a simulace to má vidět.
+    /// Routery (u Qwen3-30B-A3B ~25 MB) se načtou, jen když je potřebuje záznam nebo
+    /// předčítání podle odhadu, a s posledním z nich se uvolní.
+    func configure(tracing: Bool, speculativeExtra: Int?) {
+        self.speculativeExtra = speculativeExtra
+        if tracing || speculativeExtra != nil {
+            if predictor == nil, !predictorFailed, !routers.isEmpty {
+                predictor = RouterPredictor(fd: fd, routers: routers)
+                predictorFailed = predictor == nil
+            }
+        } else {
             predictor = nil
             pendingPredictions = [:]
+        }
+        if !tracing {
+            traceWriter?.flush()
+            traceWriter = nil
             return
         }
         guard traceWriter == nil else { return }
-        // Routery (u Qwen3-30B-A3B ~25 MB) se načtou jen se záznamem a s ním se i uvolní.
-        if predictor == nil, !predictorFailed, !routers.isEmpty {
-            predictor = RouterPredictor(fd: fd, routers: routers)
-            predictorFailed = predictor == nil
-        }
         let layerCount = (layers.keys.max() ?? -1) + 1
         var slices = [Int](repeating: 0, count: layerCount)
         for (layer, tensors) in layers {
@@ -213,13 +234,18 @@ final class ExpertPrefetcher: @unchecked Sendable {
         let name = withUnsafeBytes(of: weights.pointee.name) { raw in
             String(decoding: raw.prefix { $0 != 0 }, as: UTF8.self)
         }
-        guard let offset = tensorOffsets[name], weights.pointee.buffer != nil,
-              ggml_backend_buffer_is_host(weights.pointee.buffer) else {
+        guard let offset = tensorOffsets[name] else {
             baseLookupFailed = true
-            if ownMap == nil {
-                Self.log.warning("adresu mmapu expertů se nepodařilo zjistit – stránky se předem nemapují")
-            } else {
-                Self.log.notice("experti jdou na GPU – stránky se předem mapují přes vlastní mmap")
+            Self.log.warning("adresu mmapu expertů se nepodařilo zjistit – stránky se předem nemapují")
+            return
+        }
+        // Uzel prefillu na GPU (op_offload) má experty zkopírované v bufferu GPU. Nevzdávat se
+        // natrvalo: generování (dávka 1) běží na CPU nad mmapem a adresa se zjistí z jeho uzlu.
+        // Dřív první GPU uzel zablokoval mapování stránek pro celou dobu načtení modelu.
+        guard weights.pointee.buffer != nil, ggml_backend_buffer_is_host(weights.pointee.buffer) else {
+            if !gpuMappingLogged {
+                gpuMappingLogged = true
+                Self.log.notice("experti prefillu jdou na GPU – stránky se tam předem mapují přes vlastní mmap")
             }
             return
         }
@@ -230,10 +256,11 @@ final class ExpertPrefetcher: @unchecked Sendable {
         Self.hasPrefix(tensor, Self.topkPrefix) || wantsHidden(tensor)
     }
 
-    /// Skrytý stav pro odhad jen při generování (dávka 1) a se zapnutým záznamem. Každý uzel,
-    /// o který si callback řekne, dělí graf – u prefillu by odhad stál víc, než kolik by řekl.
+    /// Skrytý stav pro odhad jen při generování (dávka 1) a jen když ho něco použije (záznam
+    /// nebo předčítání podle odhadu). Každý uzel, o který si callback řekne, dělí graf –
+    /// u prefillu by odhad stál víc, než kolik by řekl.
     fileprivate func wantsHidden(_ tensor: UnsafeMutablePointer<ggml_tensor>) -> Bool {
-        predictor != nil && traceWriter != nil && tensor.pointee.ne.1 == 1
+        predictor != nil && (traceWriter != nil || speculativeExtra != nil) && tensor.pointee.ne.1 == 1
             && tensor.pointee.type == GGML_TYPE_F32 && Self.hasPrefix(tensor, Self.hiddenPrefix)
     }
 
@@ -263,6 +290,42 @@ final class ExpertPrefetcher: @unchecked Sendable {
             }
         }
         pendingPredictions[layer + 1] = ranked
+        if let speculativeExtra, readEnabled, !splitOnly, !useReadFallback {
+            adviseAhead(layer: layer + 1, experts: Array(ranked.prefix(max(1, activeExperts) + speculativeExtra)))
+        }
+    }
+
+    /// Ohlásí jádru experty další vrstvy podle odhadu – jen `F_RDADVISE`, bez čekání a bez
+    /// dotyku stránek. Čtení tak běží souběžně s MoE této vrstvy a attention další. Stránky,
+    /// které už v cache jsou, jádro přeskočí. Když router pak vybere jiné experty, dočtou se
+    /// běžnou cestou v `handle`; ty trefené tam najdou stránky načtené nebo rozjeté.
+    private func adviseAhead(layer: Int, experts: [Int]) {
+        guard let tensors = layers[layer], !experts.isEmpty else { return }
+        let start = Date.now
+        let sorted = experts.sorted()
+        var bytes = 0
+        for expertTensor in tensors {
+            let slice = expertTensor.bytes / expertCount
+            guard slice > 0 else { continue }
+            var index = 0
+            while index < sorted.count {
+                var end = index
+                while end + 1 < sorted.count, sorted[end + 1] == sorted[end] + 1 { end += 1 }
+                let length = (end - index + 1) * slice
+                var advice = radvisory(ra_offset: off_t(expertTensor.fileOffset + sorted[index] * slice),
+                                       ra_count: Int32(clamping: length))
+                _ = fcntl(fd, F_RDADVISE, &advice)
+                bytes += length
+                index = end + 1
+            }
+        }
+        let elapsed = Date.now.timeIntervalSince(start)
+        let announced = bytes
+        stats.withLock {
+            $0.aheadExperts += experts.count
+            $0.aheadBytes += announced
+            $0.aheadSeconds += elapsed
+        }
     }
 
     fileprivate func handle(_ tensor: UnsafeMutablePointer<ggml_tensor>) {
@@ -282,9 +345,18 @@ final class ExpertPrefetcher: @unchecked Sendable {
         if let traceWriter {
             let measureStart = Date.now
             let predicted = batchTokens == 1 ? prediction ?? [] : []
+            // Vzorek: generování jen každý n-tý token (celý token, všechny vrstvy), prefill vždy.
+            var sample = true
+            if batchTokens == 1 {
+                let perToken = max(1, layers.count)
+                let firstOfToken = decodeEvents % perToken == 0
+                sample = (decodeEvents / perToken) % Self.residencySampleTokens == 0
+                decodeEvents += 1
+                if sample, firstOfToken { stats.withLock { $0.sampledTokens += 1 } }
+            }
             // Měří se i odhadnutí experti: simulátor pak ví, kolik by předčítání podle odhadu
             // opravdu četlo z flash (odhad, který už v cache leží, nic nestojí).
-            let measured = residency(of: Array(Set(selected).union(predicted)), in: tensors)
+            let measured = sample ? residency(of: Array(Set(selected).union(predicted)), in: tensors) : nil
             traceWriter.append(layer: layer, tokens: batchTokens, experts: selected,
                                predicted: predicted, resident: measured?.resident)
             if let measured {
@@ -426,10 +498,11 @@ final class ExpertPrefetcher: @unchecked Sendable {
                 offset += bytes
             }
         }
-        DispatchQueue.concurrentPerform(iterations: chunks.count) { index in
-            self.readRange(offset: chunks[index].offset, bytes: chunks[index].bytes)
+        let all = chunks
+        DispatchQueue.concurrentPerform(iterations: all.count) { index in
+            self.readRange(offset: all[index].offset, bytes: all[index].bytes)
         }
-        return chunks.reduce(0) { $0 + $1.bytes }
+        return all.reduce(0) { $0 + $1.bytes }
     }
 
     /// Kteří z daných expertů leží v page cache, zjištěno přes `mincore` nad vlastním

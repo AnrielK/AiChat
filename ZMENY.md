@@ -1,3 +1,40 @@
+# MoE: předčítání podle odhadu z routeru, levnější měření, oprava mapování po GPU prefillu
+
+Podle tří záznamů v3 a logu z iPhonu (Qwen3-30B-A3B, k = 8, 650–840 tokenů na odpověď):
+
+- **Odhad z routeru L+1 funguje.** S k experty trefí 81 % expertů, kteří v cache chyběli, za ~24 %
+  zbytečného čtení; k+2 trefí 90 % za 56–59 %. Ve všech třech záznamech vyšlo totéž.
+- **Předčítat podle odhadu** (`prefetchAhead`, Parametry › Výkon: vypnuto / k / k+2, výchozí vypnuto).
+  Při generování se u `ffn_inp-L` odhadnou experti vrstvy L+1 a jejich rozsahy se hned ohlásí přes
+  `F_RDADVISE`, bez čekání a bez dotyku stránek. Čtení tak běží souběžně s MoE vrstvy L a attention
+  vrstvy L+1. Funguje i bez záznamu. Routery se načtou, když je potřebuje záznam nebo tahle volba.
+  Log: „podle odhadu ohlášeno N expertů, X MB za Y ms“ a v řádku generování „· podle odhadu k“.
+- **Měření rezidence jen na každém 8. tokenu.** Měřit každý token stálo 36–82 ms na token, tedy 10–18 %
+  doby generování, a s odhadem se měřilo ~18 expertů na vrstvu místo 8. Záznam tak zkresloval
+  rychlost, kterou měl měřit. Log u zásahu cache uvádí velikost vzorku.
+- **Oprava: mapování stránek po GPU prefillu.** První uzel `MUL_MAT_ID` na GPU (prefill s op_offload)
+  natrvalo vypnul zjišťování adresy mmapu, takže se při generování stránky předem nemapovaly po celou
+  dobu načtení modelu. V logu je to vidět na krátkém předčítání: 71–122 ms na token s GPU prefillem
+  proti 187–198 ms bez něj. Teď se GPU uzel přeskočí a adresa se vezme z uzlu generování na CPU.
+
+Co z logu vyšlo pro nastavení (dlouhé odpovědi, tok/s po odečtení času měření):
+
+| čas   | repack | kontext | GPU prefill | tok/s | bez měření | zásah cache |
+|-------|--------|---------|-------------|-------|------------|-------------|
+| 22:08 | ne     | 16k     | ne          | 2,17  | 2,64       | 74,6 %      |
+| 23:30 | ano    | 16k     | ne          | 2,80  | 3,38       | 73,2 %      |
+
+- **Přebalení husté části nechat zapnuté.** Stojí ~1 GB, ale page cache z něj dostala jen ~1,4 procentního
+  bodu zásahu (simulace slibovala víc, jenže iOS uvolněnou RAM cache expertů nepřidělil), kdežto
+  rychlejší jádra daly +28 % tok/s.
+- **GPU prefill u krátkých promptů nezapínat.** Prefill 52 tokenů trval s ním 9,8–10,5 s, bez něj
+  7,0–8,2 s, a RAM appky při něm vyskočila na 5,5–6,5 GB.
+- Prefill: celá vrstva v těchto bězích zapnutá nebyla, její přínos zatím změřený není.
+
+Swift je nepřeložený.
+
+---
+
 # MoE: celá vrstva při prefillu, rezidence po expertech v záznamu
 
 Podle prvního záznamu z iPhonu (Qwen3-30B-A3B, 797 tokenů, k = 8):

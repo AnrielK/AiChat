@@ -212,7 +212,7 @@ struct LocalModelSettings: Codable, Equatable, Sendable {
     /// Výchozí vypnuto, dokud to nezměří iPhone – podle záznamu by od 30 % mělo pomáhat.
     var prefillWholeLayerPercent = 0
     /// Předčítat experty další vrstvy podle odhadu z jejího routeru (`RouterPredictor`):
-    /// 0 = vypnuto, 1 = k expertů, 2 = k+2. Záznamy z iPhonu (Qwen3-30B-A3B, 3 × ~800 tokenů):
+    /// 0 = vypnuto, 1 = k expertů, 2 = k+2, 3 = k o jednu i o dvě vrstvy dopředu. Záznamy z iPhonu (Qwen3-30B-A3B, 3 × ~800 tokenů):
     /// odhad s k experty trefí 81 % expertů chybějících v cache a zbytečně přečte ~24 %
     /// nutného čtení; k+2 trefí 90 % za 56–59 %. Výchozí vypnuto, dokud to nezměří iPhone.
     var prefetchAhead = 0

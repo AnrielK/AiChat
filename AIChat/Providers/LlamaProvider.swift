@@ -327,10 +327,13 @@ actor LlamaEngine {
         // a zapisuje výběr routeru, nic nečte.
         let activePrefetcher = settings.prefetchExperts || settings.recordExpertTrace ? prefetcher : nil
         // Předčítání podle odhadu z routeru jen s běžným předčítáním (bez něj nemá kdo číst).
+        // 1 = k, 2 = k+2, 3 = k o jednu i o dvě vrstvy dopředu.
         let aheadExtra: Int? = settings.prefetchExperts && settings.prefetchAhead > 0
-            ? (settings.prefetchAhead >= 2 ? 2 : 0) : nil
+            ? (settings.prefetchAhead == 2 ? 2 : 0) : nil
+        let twoLayers = aheadExtra != nil && settings.prefetchAhead == 3
         prefetcher?.configure(tracing: activePrefetcher != nil && settings.recordExpertTrace,
-                              speculativeExtra: activePrefetcher != nil ? aheadExtra : nil)
+                              speculativeExtra: activePrefetcher != nil ? aheadExtra : nil,
+                              twoLayersAhead: twoLayers)
         activePrefetcher?.readEnabled = settings.prefetchExperts
         // Záznam na disk i při zrušení nebo chybě – useknutá odpověď je pořád platná trace.
         defer { activePrefetcher?.flushTrace() }
@@ -341,7 +344,7 @@ actor LlamaEngine {
         let waveNote = settings.prefaultPages && settings.prefetchWaveMB > 0
             ? " po \(settings.prefetchWaveMB) MB" : ""
         let traceNote = (settings.recordExpertTrace && activePrefetcher != nil ? " · záznam expertů" : "")
-            + (aheadExtra.map { " · podle odhadu \($0 == 0 ? "k" : "k+\($0)")" } ?? "")
+            + (aheadExtra.map { " · podle odhadu \($0 == 0 ? "k" : "k+\($0)")\(twoLayers ? ", dvě vrstvy" : "")" } ?? "")
         let prefetchMode = (activePrefetcher == nil || !settings.prefetchExperts ? "vyp"
             : settings.prefetchSplitOnly ? "jen dělení grafu"
             : settings.prefaultPages ? "zap + mapování stránek" + waveNote : "zap") + traceNote

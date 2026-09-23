@@ -1,3 +1,23 @@
+# MoE: předčítání o dvě vrstvy dopředu
+
+Záznam v4 z iPhonu (6 expertů, bez předčítání podle odhadu, 666 tokenů, page cache 78 %):
+
+| odhad          | trefí výpadky | čtení navíc | náskok             |
+|----------------|---------------|-------------|--------------------|
+| router L+1 (k) | 78,2 %        | 27,8 %      | 1 vrstva           |
+| router L+2 (k) | 71,6 %        | 41,2 %      | 2 vrstvy           |
+| L+1 ∪ L+2 (k)  | 84,3 %        | 52,3 %      | většinou 2 vrstvy  |
+
+- Nová volba **„k, dvě vrstvy dopředu“** (`prefetchAhead = 3`). U `ffn_inp-L` se ohlásí k expertů vrstvy L+2
+  podle jejího routeru a o vrstvu později (u `ffn_inp-L+1`) už jen experti, které odhad L+1 přidá navíc.
+  Úloha na pozadí má u L+2 o vrstvu delší lhůtu.
+- Otázka pro měření: vyplatí se o 5 % výpadků víc a delší náskok za dvojnásobné zbytečné čtení?
+  Varianta k+2 (víc zbytečného čtení, stejný náskok) byla pomalejší než k, takže výsledek není jistý.
+
+Swift je nepřeložený.
+
+---
+
 # MoE: měření odhadu o dvě vrstvy dopředu
 
 Srovnávací běhy z iPhonu (Qwen3-30B-A3B, 6 expertů, stejný dotaz, 666 tokenů, se záznamem):

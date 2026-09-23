@@ -62,6 +62,14 @@ final class ExpertPrefetcher: @unchecked Sendable {
     /// Předčítat experty další vrstvy podle odhadu z routeru: nil = ne, jinak kolik expertů
     /// navíc k `activeExperts` (0 = k, 2 = k+2). Nastavuje se přes `configure`.
     private(set) var speculativeExtra: Int?
+    /// Předčítat i o dvě vrstvy dopředu (router L+2 nad vstupem vrstvy L). Záznam z iPhonu
+    /// (6 expertů): L+2 sám trefí 72 % výpadků za 41 % zbytečného čtení, sjednocení s L+1
+    /// 84 % za 52 % (L+1 sám 78 % za 28 %). Delší náskok míří na vrstvy, u kterých výpočet
+    /// předběhl dočtení – s jednou vrstvou náskoku ve 23 % případů.
+    private(set) var twoLayersAhead = false
+    /// Co už bylo pro vrstvu ohlášeno odhadem o dvě vrstvy dřív – odhad o vrstvu dřív pak
+    /// ohlásí jen experty navíc. Klíč = vrstva, pro kterou odhad platí.
+    private var announcedEarly: [Int: Set<Int>] = [:]
     /// Rezidence (`mincore`) se měří jen na každém n-tém generovaném tokenu. Měřit každý token
     /// stálo 36–82 ms na token (u odhadu z routeru se měří ~18 expertů na vrstvu místo 8),
     /// tedy 10–18 % doby generování – záznam tím zkresloval rychlost, kterou měl měřit.
@@ -201,8 +209,10 @@ final class ExpertPrefetcher: @unchecked Sendable {
     /// protože page cache mezi nimi přetrvává a simulace to má vidět.
     /// Routery (u Qwen3-30B-A3B ~25 MB) se načtou, jen když je potřebuje záznam nebo
     /// předčítání podle odhadu, a s posledním z nich se uvolní.
-    func configure(tracing: Bool, speculativeExtra: Int?) {
+    func configure(tracing: Bool, speculativeExtra: Int?, twoLayersAhead: Bool = false) {
         self.speculativeExtra = speculativeExtra
+        self.twoLayersAhead = speculativeExtra != nil && twoLayersAhead
+        announcedEarly = [:]
         if tracing || speculativeExtra != nil {
             if predictor == nil, !predictorFailed, !routers.isEmpty {
                 predictor = RouterPredictor(fd: fd, routers: routers)
@@ -294,7 +304,8 @@ final class ExpertPrefetcher: @unchecked Sendable {
         let count = min(predictor.experts, 2 * max(1, activeExperts))
         // Odhad o dvě vrstvy dopředu jen se záznamem – router L+2 má složenou vlastní normu,
         // takže stačí stejný vstup.
-        let secondLayer = traceWriter != nil && predictor.canPredict(layer: layer + 2) ? layer + 2 : nil
+        let secondLayer = (traceWriter != nil || twoLayersAhead) && predictor.canPredict(layer: layer + 2)
+            ? layer + 2 : nil
         let predictBoth = { (hidden: UnsafePointer<Float>) -> ([Int], [Int]?) in
             let first = predictor.predict(layer: layer + 1, hidden: hidden, count: count)
             let second = secondLayer.map { predictor.predict(layer: $0, hidden: hidden, count: count) }
@@ -314,9 +325,18 @@ final class ExpertPrefetcher: @unchecked Sendable {
         }
         let (ranked, ranked2) = result
         pendingPredictions[layer + 1] = ranked
-        if let secondLayer, let ranked2 { pendingPredictions2[secondLayer] = ranked2 }
+        if let secondLayer, let ranked2, traceWriter != nil { pendingPredictions2[secondLayer] = ranked2 }
         if let speculativeExtra, readEnabled, !splitOnly, !useReadFallback {
-            scheduleAhead(layer: layer + 1, experts: Array(ranked.prefix(max(1, activeExperts) + speculativeExtra)))
+            let k = max(1, activeExperts)
+            // O vrstvu dopředu jen to, co odhad o dvě vrstvy dřív pro tuhle vrstvu neohlásil.
+            let early = announcedEarly.removeValue(forKey: layer + 1) ?? []
+            let next = ranked.prefix(k + speculativeExtra).filter { !early.contains($0) }
+            if !next.isEmpty { scheduleAhead(layer: layer + 1, experts: next, lead: 1) }
+            if twoLayersAhead, let secondLayer, let ranked2 {
+                let far = Array(ranked2.prefix(k))
+                announcedEarly[secondLayer] = Set(far)
+                scheduleAhead(layer: secondLayer, experts: far, lead: 2)
+            }
         }
     }
 
@@ -336,7 +356,8 @@ final class ExpertPrefetcher: @unchecked Sendable {
     ///    (~10 000 výpadků „jen mapování“ po ~6 µs). Přeskočí se, jakmile výpočet vrstvu předběhne.
     ///
     /// Když router vybere jiné experty, dočtou se běžnou cestou v `handle`.
-    private func scheduleAhead(layer: Int, experts: [Int]) {
+    /// `lead` = o kolik vrstev dopředu (1 = další vrstva, 2 = ob jednu).
+    private func scheduleAhead(layer: Int, experts: [Int], lead: Int) {
         guard let tensors = layers[layer], !experts.isEmpty else { return }
         let sorted = experts.sorted()
         var ranges: [(offset: Int, bytes: Int)] = []
@@ -358,7 +379,7 @@ final class ExpertPrefetcher: @unchecked Sendable {
         let baseAddress = prefaultPages ? mappingBase.map { Int(bitPattern: $0) } : nil
         // Tahle vrstva je teď `N`; výběr routeru pro ni přijde jako další, pro N+1 jako ten po něm.
         // Až výpočet výběr pro N+1 zpracuje, je na dotyk pozdě.
-        let deadline = decodeProgress.withLock { $0 } + 2
+        let deadline = decodeProgress.withLock { $0 } + 1 + lead
         let fd = self.fd
         aheadQueue.async { [self] in
             let start = Date.now

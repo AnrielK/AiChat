@@ -1,3 +1,13 @@
+# MLX: architektura spark2_5 (Spark-X2.5-4B)
+
+- mlx-swift-lm 3.31.4 `spark2_5` nezná („Unsupported model type“). `MLXSpark25.swift` je port Python
+  implementace z mlx-lm (PR #1891): sliding/full attention (okno 512), sloučená `q_k_v_proj`, sigmoid
+  brána výstupu po hlavách (`g_proj`, nekvantovaná), částečné RoPE (full: 25 % dimenzí, θ 5M; sliding:
+  plné, θ 10k), GELU MLP, sdílené embeddingy. Registruje se do `LLMTypeRegistry` před načtením modelu
+  (chat i trénink LoRA).
+
+---
+
 # Test: MoE z flash přes MLX (rozhodnutí před přepisem)
 
 - Parametry › Rychlost úložiště, u GGUF MoE: „Test: MoE z flash přes MLX“ (`MLXMoEProbe`). Napodobí
@@ -7,6 +17,14 @@
   a celý průchod se čtením expertů přes paralelní pread a kopií do MLX polí. Výsledek: cena čekání
   na vrstvu, doba čtení a kopie na token a strop tok/s bez předčítání i s ideálním předčítáním.
   Rozhodnutí: nad ~6 tok/s má přepis smysl (GGUF teď 4,6–5,2).
+- **Výsledek** (iPhone, Qwen3-30B-A3B, 6 expertů, záznam z 23. 9.): GPU bez čekání 37 ms/token, s čekáním
+  na router 155 ms (2,44 ms na vrstvu), čtení 224 ms (784 MB přes pread, 3,42 GB/s), kopie do MLX 25 ms.
+  Strop 2,9 tok/s bez předčítání, 4,5 tok/s s ideálním předčítáním – pod GGUF. Druhý běh hned po generování
+  v GGUF (teplá page cache, čerstvý záznam, zásah cache 95 %): čtení 174 ms (4,40 GB/s – většinou jen kopie
+  z page cache), čekání 158 ms, strop 3,5 / 5,5 tok/s; GGUF ve stejné chvíli 4,40 tok/s se zapnutým záznamem.
+  I s nulovým čtením zůstává čekání + kopie ~180 ms → nejvýš ~5,5–6 tok/s. **Přepis se nedělá.**
+  Brzdí čekání na GPU v každé vrstvě (118 ms z tokenu) a to, že MLX musí vybrané experty pokaždé
+  zkopírovat, i když leží v page cache – llama.cpp je díky mmapu používá přímo.
 
 ---
 

@@ -524,6 +524,8 @@ actor MLXEngine {
         if let reduced = source.experts {
             Self.log.notice("MoE: \(reduced) z \(MLXExperts.used(in: directory) ?? 0) expertů na token (sníženo)")
         }
+        // Architektury, které mlx-swift-lm zatím nezná (Spark-X2.5).
+        await MLXSpark25.register()
         let loaded: MLXLMCommon.ModelContainer
         do {
             loaded = try await LLMModelFactory.shared.loadContainer(

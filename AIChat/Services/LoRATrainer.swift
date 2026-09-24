@@ -472,6 +472,7 @@ actor LoRATrainer {
         }
 
         TrainingPhase.mark(.loadingModel)
+        await MLXSpark25.register()
         let container = try await LLMModelFactory.shared.loadContainer(
             from: model.url,
             using: #huggingFaceTokenizerLoader()

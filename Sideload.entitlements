@@ -7,10 +7,15 @@
   - increased-memory-limit: vyšší limit paměti před ukončením (jetsam).
     Na iPhonu s 8 GB RAM zvedne limit appky z ~3,3 GB na ~6,5 GB. Ověřeno,
     že stačí sám o sobě – JIT (StikDebug) kvůli paměti není potřeba.
+  - extended-virtual-addressing: větší adresní prostor procesu. llama.cpp mapuje celý
+    GGUF (mmap); u modelů přes ~20 GB (Qwen3.6-35B-A3B Q4_K_M má 22 GB) by se mapování
+    nemuselo do výchozího adresního prostoru vejít. Paměť to nezabírá.
 -->
 <plist version="1.0">
 <dict>
 	<key>com.apple.developer.kernel.increased-memory-limit</key>
+	<true/>
+	<key>com.apple.developer.kernel.extended-virtual-addressing</key>
 	<true/>
 </dict>
 </plist>

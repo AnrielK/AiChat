@@ -119,6 +119,17 @@ final class ExpertPrefetcher: @unchecked Sendable {
     /// je rychlejší přečíst všechno, i když se tím přečte víc bajtů. Záznam z iPhonu
     /// (Qwen3-30B-A3B, dávky 20–52 tokenů): průměrné pokrytí 40 %, 74 % vrstev nad 30 %.
     var wholeLayerCoverage = 0.0
+    /// Jak předčítat experty podle odhadu: 0 = `F_RDADVISE` (jádro si čtení naplánuje samo),
+    /// N ≥ 1 = `pread` do pomocného bufferu v N paralelních vláknech po kouscích („fanout“
+    /// z Flash-iOS). Na iOS sdílí `pread` a mmap jednu cache souboru, takže přečtené stránky
+    /// pak výpočet najde v paměti. Na rozdíl od `F_RDADVISE` jde o skutečné čtení velkými
+    /// bloky s předem daným paralelismem – otázka je, jestli flash iPhonu dá víc než readahead.
+    var aheadReadFanout = 0
+    /// Pomocné buffery pro `pread` (jeden na vlákno). Používá je jen `aheadQueue` (sériová).
+    private var aheadBuffers: [UnsafeMutableRawPointer] = []
+    private static let aheadBufferBytes = 1 << 20
+    /// Nejmenší kousek, na který se rozsah dělí mezi vlákna – menší I/O by flash nevytížily.
+    private static let aheadMinChunk = 256 << 10
 
     /// Adresa začátku souboru v mmapu llama.cpp (tenzor = adresa + offset v souboru).
     /// Zjistí se z prvního `MUL_MAT_ID` uzlu, který scheduler nabídne callbacku.
@@ -191,6 +202,7 @@ final class ExpertPrefetcher: @unchecked Sendable {
 
     deinit {
         if let ownMap, ownMapBytes > 0 { munmap(UnsafeMutableRawPointer(mutating: ownMap), ownMapBytes) }
+        for buffer in aheadBuffers { buffer.deallocate() }
         close(fd)
     }
 
@@ -289,9 +301,30 @@ final class ExpertPrefetcher: @unchecked Sendable {
     /// Skrytý stav pro odhad jen při generování (dávka 1) a jen když ho něco použije (záznam
     /// nebo předčítání podle odhadu). Každý uzel, o který si callback řekne, dělí graf –
     /// u prefillu by odhad stál víc, než kolik by řekl.
+    ///
+    /// Jen přesné jméno uzlu („attn_post_norm-12“), ne odvozené pohledy („attn_post_norm-12
+    /// (reshaped)“): u Qwen3.6 z něj MoE dělá 3D tvar s `ne[1] = 1` i při prefillu, takže se
+    /// odhad počítal dvakrát na vrstvu a při prefillu z dat prvního tokenu.
     fileprivate func wantsHidden(_ tensor: UnsafeMutablePointer<ggml_tensor>) -> Bool {
-        predictor != nil && (traceWriter != nil || speculativeExtra != nil) && tensor.pointee.ne.1 == 1
-            && tensor.pointee.type == GGML_TYPE_F32 && Self.hasPrefix(tensor, hiddenPrefix)
+        predictor != nil && (traceWriter != nil || speculativeExtra != nil)
+            && tensor.pointee.ne.1 == 1 && tensor.pointee.ne.2 == 1 && tensor.pointee.ne.3 == 1
+            && tensor.pointee.type == GGML_TYPE_F32 && Self.exactLayerName(tensor, prefix: hiddenPrefix)
+    }
+
+    /// Jméno je přesně prefix + číslo vrstvy, nic za ním.
+    private static func exactLayerName(_ tensor: UnsafeMutablePointer<ggml_tensor>, prefix: [CChar]) -> Bool {
+        withUnsafeBytes(of: tensor.pointee.name) { raw in
+            guard raw.count > prefix.count, zip(raw, prefix).allSatisfy({ UInt8(bitPattern: $1) == $0 }) else {
+                return false
+            }
+            var digits = 0
+            for byte in raw.dropFirst(prefix.count) {
+                if byte == 0 { return digits > 0 }
+                guard byte >= 48, byte <= 57 else { return false }
+                digits += 1
+            }
+            return false
+        }
     }
 
     private static func hasPrefix(_ tensor: UnsafeMutablePointer<ggml_tensor>, _ prefix: [CChar]) -> Bool {
@@ -390,13 +423,18 @@ final class ExpertPrefetcher: @unchecked Sendable {
         // Až výpočet výběr pro N+1 zpracuje, je na dotyk pozdě.
         let deadline = decodeProgress.withLock { $0 } + 1 + lead
         let fd = self.fd
+        let fanout = aheadReadFanout
         aheadQueue.async { [self] in
             let start = Date.now
             var bytes = 0
-            for range in all {
-                var advice = radvisory(ra_offset: off_t(range.offset), ra_count: Int32(clamping: range.bytes))
-                _ = fcntl(fd, F_RDADVISE, &advice)
-                bytes += range.bytes
+            if fanout > 0 {
+                bytes = readAhead(all, fanout: fanout, deadline: deadline)
+            } else {
+                for range in all {
+                    var advice = radvisory(ra_offset: off_t(range.offset), ra_count: Int32(clamping: range.bytes))
+                    _ = fcntl(fd, F_RDADVISE, &advice)
+                    bytes += range.bytes
+                }
             }
             let elapsed = Date.now.timeIntervalSince(start)
             let announced = bytes
@@ -417,6 +455,64 @@ final class ExpertPrefetcher: @unchecked Sendable {
                 }
             }
         }
+    }
+
+    /// Přečte rozsahy přes `pread` v `fanout` paralelních vláknech (volá jen `aheadQueue`).
+    ///
+    /// Rozsahy se rozdělí na kousky zarovnané na stránky (aspoň `aheadMinChunk`, jinak
+    /// rovným dílem mezi vlákna) a vlákna si je berou postupně. Každé vlákno čte do svého
+    /// 1MB bufferu – data se zahodí, jde jen o to, aby stránky skončily v cache souboru.
+    /// Jakmile výpočet vrstvu předběhne, zbylé kousky se přeskočí. Vrací přečtené bajty.
+    private func readAhead(_ ranges: [(offset: Int, bytes: Int)], fanout: Int, deadline: Int) -> Int {
+        let page = Self.pageSize
+        var chunks: [(offset: Int, bytes: Int)] = []
+        for range in ranges {
+            let share = (range.bytes + fanout - 1) / fanout
+            let piece = max(Self.aheadMinChunk, (share + page - 1) / page * page)
+            var offset = range.offset
+            let end = range.offset + range.bytes
+            while offset < end {
+                // Hranice kousků na hranici stránky v souboru, ať dvě vlákna nečtou stejnou stránku.
+                var next = min(end, offset + piece)
+                if next < end { next = max(offset + page, next / page * page) }
+                chunks.append((offset, next - offset))
+                offset = next
+            }
+        }
+        while aheadBuffers.count < fanout {
+            aheadBuffers.append(.allocate(byteCount: Self.aheadBufferBytes, alignment: page))
+        }
+        let buffers = aheadBuffers.prefix(fanout).map { Int(bitPattern: $0) }
+        let fd = self.fd
+        let next = OSAllocatedUnfairLock(initialState: 0)
+        let done = OSAllocatedUnfairLock(initialState: (bytes: 0, late: false))
+        let list = chunks
+        DispatchQueue.concurrentPerform(iterations: min(fanout, list.count)) { worker in
+            guard let buffer = UnsafeMutableRawPointer(bitPattern: buffers[worker]) else { return }
+            while true {
+                let index = next.withLock { (value: inout Int) -> Int in
+                    defer { value += 1 }
+                    return value
+                }
+                guard index < list.count else { return }
+                if decodeProgress.withLock({ $0 }) >= deadline {
+                    done.withLock { $0.late = true }
+                    return
+                }
+                let chunk = list[index]
+                var read = 0
+                while read < chunk.bytes {
+                    let size = min(Self.aheadBufferBytes, chunk.bytes - read)
+                    let count = pread(fd, buffer, size, off_t(chunk.offset + read))
+                    if count <= 0 { break }
+                    read += count
+                }
+                done.withLock { $0.bytes += read }
+            }
+        }
+        let result = done.withLock { $0 }
+        if result.late { stats.withLock { $0.aheadLate += 1 } }
+        return result.bytes
     }
 
     fileprivate func handle(_ tensor: UnsafeMutablePointer<ggml_tensor>) {

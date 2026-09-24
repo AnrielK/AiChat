@@ -339,12 +339,14 @@ actor LlamaEngine {
         defer { activePrefetcher?.flushTrace() }
         activePrefetcher?.splitOnly = settings.prefetchSplitOnly
         activePrefetcher?.prefaultPages = settings.prefaultPages
+        activePrefetcher?.aheadReadFanout = max(0, settings.prefetchAheadFanout)
         activePrefetcher?.waveBytes = settings.prefetchWaveMB * 1_048_576
         activePrefetcher?.wholeLayerCoverage = Double(max(0, settings.prefillWholeLayerPercent)) / 100
         let waveNote = settings.prefaultPages && settings.prefetchWaveMB > 0
             ? " po \(settings.prefetchWaveMB) MB" : ""
         let traceNote = (settings.recordExpertTrace && activePrefetcher != nil ? " · záznam expertů" : "")
             + (aheadExtra.map { " · podle odhadu \($0 == 0 ? "k" : "k+\($0)")\(twoLayers ? ", dvě vrstvy" : "")" } ?? "")
+            + (aheadExtra != nil && settings.prefetchAheadFanout > 0 ? " přes pread ×\(settings.prefetchAheadFanout)" : "")
         let prefetchMode = (activePrefetcher == nil || !settings.prefetchExperts ? "vyp"
             : settings.prefetchSplitOnly ? "jen dělení grafu"
             : settings.prefaultPages ? "zap + mapování stránek" + waveNote : "zap") + traceNote

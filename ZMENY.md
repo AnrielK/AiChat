@@ -1,3 +1,35 @@
+# MoE: čtení odhadu přes paralelní pread (z Flash-iOS) a větší adresní prostor
+
+- **Čtení odhadu** (Parametry › Výkon, pod „Předčítat podle odhadu“): `F_RDADVISE` (výchozí, beze změny)
+  nebo `pread ×1 / ×2 / ×4`. S pread se odhadnutí experti opravdu přečtou do 1MB pomocného bufferu
+  v N vláknech po kouscích zarovnaných na stránky (min. 256 kB) – stejně jako „fanout“ ve Flash-iOS.
+  pread a mmap sdílejí na iOS jednu cache souboru, takže výpočet stránky najde v paměti. Čtení běží
+  na pozadí jako dosud; jakmile výpočet vrstvu předběhne, zbylé kousky se přeskočí (počítá se do
+  „výpočet předběhl“). Doba v řádku „podle odhadu“ je u pread skutečná doba čtení, u F_RDADVISE jen
+  doba ohlášení. Nezměřeno – výchozí zůstává F_RDADVISE.
+- **Entitlement `extended-virtual-addressing`** (AIChat i Sideload): llama.cpp mapuje celý GGUF;
+  u modelů kolem 22 GB (Qwen3.6-35B-A3B Q4_K_M) se mapování nemusí vejít do výchozího adresního prostoru.
+  Paměť nezabírá. Kdyby ho podpis nebo sideload nástroj odmítl, stačí klíč z `.entitlements` odebrat.
+
+---
+
+# MoE: oprava zdvojeného odhadu u Qwen3.6 a první měření REAP
+
+- **Oprava:** u Qwen3.6 dělá MoE ze vstupu `attn_post_norm-N` přetvarovaný pohled „attn_post_norm-N
+  (reshaped)“ s `ne[1] = 1` i při prefillu. Kontrola prefixu ho brala jako další vstup, takže se odhad
+  počítal dvakrát na vrstvu (log ukazoval 2× víc ohlášených expertů, než kolik výpočet použil) a při
+  prefillu se odhadovalo z dat prvního tokenu. Teď se bere jen přesné jméno uzlu a 2D tvar s jedním tokenem.
+- **REAP-48 v2** (Qwen3.6-35B-A3B, 133 expertů/vrstvu, 9,4 GB, 6 expertů, 3 vlákna, odhad k):
+  5,08–5,45 tok/s bez přemýšlení, 47 MB/token z flash ve výpočtu. Qwen3-30B-A3B: 5,17 tok/s, 128 MB/token.
+  Čte se o 60 % méně, ale rychlost je skoro stejná, protože teď brzdí výpočet, ne flash: experti jsou
+  v IQ3_S/IQ4_XS (na CPU iPhonu pomalejší jádra než Q4_K), přebalí se jen 71 matic místo 193, hustá
+  část má 1,78 GB místo 1,02 GB (sdílený expert a attention v Q5–Q8 počítané u každého tokenu)
+  a slovník má 248 tisíc tokenů místo 152 tisíc.
+- První odpověď po načtení (2,08 tok/s) byla se studenou page cache a s rozptylem telefonu. Qwen3-30B
+  se stejným nastavením dal jednou 5,17 a jindy 3,87 tok/s.
+
+---
+
 # MoE: odhad expertů i pro Qwen3.5/3.6 MoE (Qwen3.6-35B-A3B)
 
 llama.cpp u architektury `qwen35moe` (a `qwen3next`) nemá `ffn_norm`. Norma před MoE je uložená jako

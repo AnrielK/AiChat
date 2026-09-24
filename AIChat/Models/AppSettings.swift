@@ -218,6 +218,10 @@ struct LocalModelSettings: Codable, Equatable, Sendable {
     /// bez odhadu 4,32 tok/s, s k 4,72 tok/s. k+2 i „dvě vrstvy“ byly pomalejší než k
     /// (zbytečné čtení bere propustnost flash) – proto je výchozí k.
     var prefetchAhead = 1
+    /// Jak číst experty podle odhadu: 0 = `F_RDADVISE` (dosavadní), 1/2/4 = `pread` v tolika
+    /// paralelních vláknech po kouscích (převzato z Flash-iOS). Viz `ExpertPrefetcher.aheadReadFanout`.
+    /// Výchozí `F_RDADVISE`, dokud `pread` nezměří iPhone.
+    var prefetchAheadFanout = 0
     /// Zaznamenávat, které experty router vybírá, a měřit zásah page cache (`mincore`).
     /// Záznam jde v Parametrech přehrát v simulátoru cache (`ExpertCacheSimulator`) nebo na
     /// počítači nástrojem `tools/expert_cache_sim.py`. Diagnostika, proto mimo předvolby.
@@ -402,6 +406,7 @@ extension LocalModelSettings {
             preset.prefetchWaveMB = 0
             preset.prefillWholeLayerPercent = 0
             preset.prefetchAhead = 1
+            preset.prefetchAheadFanout = 0
             preset.prefetchSplitOnly = false
             preset.repackDense = true
             preset.streamingGPU = false
@@ -503,6 +508,7 @@ extension LocalModelSettings {
         recordExpertTrace = try container.decodeIfPresent(Bool.self, forKey: .recordExpertTrace) ?? recordExpertTrace
         prefillWholeLayerPercent = try container.decodeIfPresent(Int.self, forKey: .prefillWholeLayerPercent) ?? prefillWholeLayerPercent
         prefetchAhead = try container.decodeIfPresent(Int.self, forKey: .prefetchAhead) ?? prefetchAhead
+        prefetchAheadFanout = try container.decodeIfPresent(Int.self, forKey: .prefetchAheadFanout) ?? prefetchAheadFanout
         streamingGPU = try container.decodeIfPresent(Bool.self, forKey: .streamingGPU) ?? streamingGPU
         repackDense = try container.decodeIfPresent(Bool.self, forKey: .repackDense) ?? repackDense
         expertsPerToken = try container.decodeIfPresent(Int.self, forKey: .expertsPerToken) ?? expertsPerToken

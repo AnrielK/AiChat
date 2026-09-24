@@ -118,7 +118,7 @@ actor MLXEngine {
         MemoryBudget.cap = max(0, settings.memoryCapMB) * 1_048_576
         // Znovu i tady: strop se dá v Parametrech změnit, aniž by se model přenačítal.
         Self.applyMemoryLimit()
-        let container = try await load(directory)
+        let container = try await load(directory, experts: settings.expertsPerToken)
         defer { Memory.clearCache() }
 
         // Kontext podle volné paměti (měřeno po načtení modelu) – dlouhý text by jinak appku shodil.
@@ -479,13 +479,15 @@ actor MLXEngine {
         turn.role == .user ? .user(turn.text) : .assistant(turn.text)
     }
 
-    private func load(_ directory: URL) async throws -> MLXLMCommon.ModelContainer {
+    /// `experts` = kolik expertů na token u MoE (0 = podle modelu), viz `MLXExperts`.
+    private func load(_ directory: URL, experts: Int) async throws -> MLXLMCommon.ModelContainer {
         // Natrénovaný adaptér je součástí identity načteného modelu: po jeho zapnutí
         // nebo vypnutí se musí model načíst znovu, jinak by se dál generovalo
         // z toho, co je zrovna v paměti.
         let adapterDirectory = AdapterPaths.active(forModelAt: directory)
         let path = directory.path(percentEncoded: false)
             + (adapterDirectory.map { "|" + $0.path(percentEncoded: false) } ?? "")
+            + (experts > 0 ? "|k\(experts)" : "")
         if let container, path == loadedPath { return container }
         unload()
 
@@ -513,10 +515,19 @@ actor MLXEngine {
         // na iPhonu bez rozšířeného limitu to při delším textu vede k ukončení appky.
         Memory.cacheLimit = 32 * 1_048_576
         Self.applyMemoryLimit()
+        let source: (url: URL, experts: Int?)
+        do {
+            source = try MLXExperts.loadDirectory(for: directory, requested: experts)
+        } catch {
+            throw ProviderError.engine("Počet expertů se nepodařilo změnit: \(error.localizedDescription) Vrať v Parametrech „Aktivních expertů“ na „podle modelu“.")
+        }
+        if let reduced = source.experts {
+            Self.log.notice("MoE: \(reduced) z \(MLXExperts.used(in: directory) ?? 0) expertů na token (sníženo)")
+        }
         let loaded: MLXLMCommon.ModelContainer
         do {
             loaded = try await LLMModelFactory.shared.loadContainer(
-                from: directory,
+                from: source.url,
                 using: #huggingFaceTokenizerLoader()
             )
         } catch {

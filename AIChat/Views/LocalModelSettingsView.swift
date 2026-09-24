@@ -7,6 +7,9 @@ struct LocalModelSettingsView: View {
     @State private var editedProfile: TaskProfile = .extract
     @State private var storageResults: [StorageBenchmark.Result] = []
     @State private var measuringStorage = false
+    /// Test, jestli by se vyplatilo streamovat experty MoE přes MLX (`MLXMoEProbe`).
+    @State private var probing = false
+    @State private var probeLines: [(String, String)] = []
 
     private let contextOptions = [1024, 2048, 4096, 8192, 16384, 32768, 65536, 131_072]
 
@@ -128,6 +131,17 @@ struct LocalModelSettingsView: View {
                     Picker("KV cache – hodnoty (V)", selection: $settings.local.kvCacheV) {
                         ForEach(KVCachePrecision.allCases) { Text($0.title).tag($0) }
                     }
+                    if let used = mlxExpertsUsed {
+                        Stepper(value: $settings.local.expertsPerToken, in: 0...used) {
+                            LabeledContent("Aktivních expertů") {
+                                Text(settings.local.expertsPerToken == 0 || settings.local.expertsPerToken >= used
+                                     ? "podle modelu (\(used))" : "\(settings.local.expertsPerToken) z \(used)")
+                            }
+                        }
+                        Text("MoE model: kolik expertů smí router v každé vrstvě vybrat. Méně expertů = rychlejší generování i prompt (výpočet MoE vrstev roste s jejich počtem), ale RAM se neušetří – u MLX leží všichni experti v paměti. 8→6 bývá skoro bez rozdílu v kvalitě, 8→4 už znát je. Změna model znovu načte.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
                 }
             } header: {
                 Text("Délka")
@@ -247,13 +261,13 @@ struct LocalModelSettingsView: View {
             }
             if isMoE {
                 Toggle("Experty MoE z úložiště", isOn: $settings.local.streamExperts)
-            }
-            if isStreaming {
                 Stepper(value: $settings.local.expertsPerToken, in: 0...maxExpertsPerToken) {
                     LabeledContent("Aktivních expertů") {
                         Text(local.expertsPerToken == 0 ? "podle modelu" : "\(local.expertsPerToken)")
                     }
                 }
+            }
+            if isStreaming {
                 Toggle("Předčítat experty", isOn: $settings.local.prefetchExperts)
                 if local.prefetchExperts {
                     if !local.prefetchSplitOnly {
@@ -313,8 +327,13 @@ struct LocalModelSettingsView: View {
         } else {
             parts.append("Hustý model leží celý v RAM a počítá se na GPU – vlákna CPU se uplatní hlavně při vypnuté akceleraci a u vrstev, které na GPU nejsou. Nula u vláken pro prompt znamená stejnou hodnotu jako u generování.")
         }
-        if isStreaming {
+        if isMoE {
             parts.append("Aktivních expertů: kolik jich smí router v každé vrstvě vybrat. Kolik se toho na token přečte z flash, je na tomhle čísle přímo úměrné – u Qwen3-30B-A3B je osm expertů ve 48 vrstvách asi 1 GB na token, šest expertů tři čtvrtiny, čtyři polovina. Model je ale na svoje top-k trénovaný, takže snížením klesá kvalita: 8→6 bývá skoro bez rozdílu, 8→4 už znát je. Změna znovu načte model.")
+            if !isStreaming {
+                parts.append("U MoE celého v RAM (experti z úložiště vypnuté) se čtení z flash neušetří, ale výpočet MoE vrstev na GPU klesne zhruba úměrně počtu expertů – generování na Metalu stojí hlavně na tom, kolik vah se na token projde.")
+            }
+        }
+        if isStreaming {
             parts.append("Předčítat experty: jakmile router vrstvy vybere experty, appka je paralelně načte z flash po celých blocích, místo aby je výpočet dotahoval stránku po stránce. Mapovat stránky předem: předčtené stránky se paralelně namapují do procesu, aby je výpočet nemapoval po jedné sám.")
             parts.append("Předčítat po vlnách: místo aby se naráz ohlásily všechny experty vrstvy, ohlásí se jen kus a počká se na jeho načtení. Měření na iPhonu ukázalo, že na velikosti vlny nezáleží – prefill dostával jednu stránku na operaci při 8, 16, 32 i 64 MB stejně jako bez vln. Výchozí je proto vypnuto, volba zůstává jen pro pokusy na jiném hardwaru. Jen dělit graf (bez čtení) je diagnostika: výpočet se zastavuje ve vrstvách stejně jako při předčítání, ale nic se nečte – porovnáním s vypnutým předčítáním se změří, kolik stojí samotné zastavování.")
             parts.append("Předčítat podle odhadu: při generování se z routeru další vrstvy odhadne, které experty vybere, a jejich čtení se ohlásí o vrstvu dřív – běží pak souběžně s výpočtem místo čekání. Záznamy z iPhonu: odhad s k experty trefí 81 % expertů, kteří v cache chybějí, a zbytečně přečte asi čtvrtinu toho, co se číst musí; k+2 trefí 90 % za zhruba 57 % navíc a v praxi byl pomalejší. „Dvě vrstvy dopředu“ ohlásí k expertů i podle routeru o dvě vrstvy dál, takže čtení má delší náskok: trefí 84 % výpadků za 52 % navíc – na iPhonu ale byl o 9 % pomalejší než k, zbytečné čtení sebere víc, než delší náskok dá. Výchozí je k: proti vypnutému odhadu zhruba +9 %. Stojí jedno zastavení výpočtu na vrstvu navíc a ~25 MB na routery. Porovnej tok/s v Logu enginu s volbou a bez ní – se záznamem expertů vypnutým, jinak čísla zkreslí měření.")
@@ -432,6 +451,12 @@ struct LocalModelSettingsView: View {
 
     /// Horní mez posuvníku: kolik expertů model ve skutečnosti používá (když je načtený),
     /// jinak rozumný strop. Nad hodnotu z metadat se stejně nic nepřepisuje.
+    /// Kolik expertů vybírá vybraný MLX model (z config.json). nil = není MLX MoE.
+    private var mlxExpertsUsed: Int? {
+        guard isMLX, let id = settings.selectedLocalModel, let directory = MLXExperts.directory(forID: id) else { return nil }
+        return MLXExperts.used(in: directory)
+    }
+
     private var maxExpertsPerToken: Int {
         max(1, LocalRuntime.shared.streamedExperts?.expertUsed ?? 16)
     }
@@ -483,6 +508,27 @@ struct LocalModelSettingsView: View {
                     }
                 }
             }
+            if isMoE {
+                Button {
+                    runMoEProbe()
+                } label: {
+                    if probing {
+                        HStack {
+                            ProgressView()
+                            Text("Testuji MLX…")
+                        }
+                    } else {
+                        Label("Test: MoE z flash přes MLX", systemImage: "gauge.with.dots.needle.67percent")
+                    }
+                }
+                .disabled(probing || measuringStorage || selectedGGUFPath == nil)
+                ForEach(probeLines.indices, id: \.self) { index in
+                    LabeledContent(probeLines[index].0) {
+                        Text(probeLines[index].1).monospacedDigit()
+                    }
+                    .font(.footnote)
+                }
+            }
             if storageResults.contains(where: { !$0.isCold }) {
                 Label("Část bloků byla v page cache – označená měření jsou nadhodnocená a nejsou stropem úložiště.", systemImage: "exclamationmark.triangle")
                     .font(.footnote)
@@ -491,8 +537,43 @@ struct LocalModelSettingsView: View {
         } header: {
             Text("Rychlost úložiště")
         } footer: {
-            Text("Přečte z vybraného GGUF souboru náhodné bloky po 1 MB, pro různý počet souběžných vláken. Čte se stejnou cestou jako při generování – namapovaný soubor, ohlášení přes F_RDADVISE, pak dotyk stránek – aby výsledek odpovídal tomu, co engine opravdu zvládne. Trvá to pár desítek sekund a je to jen čtení, souboru se to nedotkne.\n\nU MoE modelů streamovaných z úložiště je tohle číslo strop rychlosti: na každý token se přečte pevný objem dat a rychleji než flash to nepůjde. Druhý sloupec ukazuje, kolik tokenů za sekundu z toho vychází pro právě načtený model.\n\nKde se křivka láme, tam je nasycené úložiště – nastav vlákna CPU zhruba na tu hodnotu. Víc vláken už propustnost nezvedne a na výkonu ubere, protože si překážejí u výpadků stránek. Když ani nejvyšší hodnota nestačí, pomůže jen číst na token míň dat: méně aktivních expertů nebo model s nižší kvantizací expertů.")
+            Text("Přečte z vybraného GGUF souboru náhodné bloky po 1 MB, pro různý počet souběžných vláken. Čte se stejnou cestou jako při generování – namapovaný soubor, ohlášení přes F_RDADVISE, pak dotyk stránek – aby výsledek odpovídal tomu, co engine opravdu zvládne. Trvá to pár desítek sekund a je to jen čtení, souboru se to nedotkne.\n\nTest MoE z flash přes MLX (jen u GGUF MoE): napodobí generování na GPU přes MLX s rozměry vybraného modelu – husté váhy jsou nulové matice správné velikosti, experti se opravdu čtou ze souboru podle posledního záznamu expertů (bez záznamu náhodně, pak je čtení pesimistické). Změří cenu čekání na router v každé vrstvě, čtení z flash a kopii do MLX a z toho spočítá strop rychlosti. Načtené modely se před testem uvolní. Trvá asi půl minuty.\n\nU MoE modelů streamovaných z úložiště je tohle číslo strop rychlosti: na každý token se přečte pevný objem dat a rychleji než flash to nepůjde. Druhý sloupec ukazuje, kolik tokenů za sekundu z toho vychází pro právě načtený model.\n\nKde se křivka láme, tam je nasycené úložiště – nastav vlákna CPU zhruba na tu hodnotu. Víc vláken už propustnost nezvedne a na výkonu ubere, protože si překážejí u výpadků stránek. Když ani nejvyšší hodnota nestačí, pomůže jen číst na token míň dat: méně aktivních expertů nebo model s nižší kvantizací expertů.")
         }
+    }
+
+    /// Změří, jak rychle by šlo MoE streamované z flash počítat na GPU přes MLX. Modely se
+    /// předtím uvolní – test si bere ~1,5 GB paměti a page cache má zůstat pro experty.
+    private func runMoEProbe() {
+        #if canImport(llama) && canImport(MLX)
+        guard let path = selectedGGUFPath else { return }
+        let experts = settings.local.expertsPerToken
+        probing = true
+        probeLines = []
+        Task {
+            await LlamaEngine.shared.unload()
+            await MLXEngine.shared.unload()
+            let outcome = await Task.detached(priority: .userInitiated) { () -> Swift.Result<MLXMoEProbe.Result, Error> in
+                Swift.Result(catching: { try MLXMoEProbe.run(ggufPath: path, expertsPerToken: experts) })
+            }.value
+            switch outcome {
+            case .success(let result):
+                func ms(_ seconds: Double) -> String { "\(Int((seconds * 1000).rounded())) ms" }
+                probeLines = [
+                    ("Model", result.summary),
+                    ("Experti", result.source),
+                    ("GPU bez čekání", ms(result.gpuBatched) + " / token"),
+                    ("GPU s čekáním v každé vrstvě", ms(result.gpuSynced) + String(format: " (%.2f ms na vrstvu)", result.syncPerLayerMs)),
+                    ("Čtení z flash", ms(result.pipelineRead) + " · \(result.bytesPerToken / 1_048_576) MB" + String(format: " · %.2f GB/s", result.readGigabytesPerSecond)),
+                    ("Kopie do MLX", ms(result.pipelineUpload)),
+                    ("Celý průchod", ms(result.pipeline) + String(format: " → %.1f tok/s", result.serialTokensPerSecond)),
+                    ("S ideálním předčítáním", String(format: "≤ %.1f tok/s", result.overlapTokensPerSecond)),
+                ]
+            case .failure(let error):
+                probeLines = [("Chyba", error.localizedDescription)]
+            }
+            probing = false
+        }
+        #endif
     }
 
     private func measureStorage() {

@@ -220,7 +220,8 @@ struct LocalModelSettings: Codable, Equatable, Sendable {
     var prefetchAhead = 1
     /// Jak číst experty podle odhadu: 0 = `F_RDADVISE` (dosavadní), 1/2/4 = `pread` v tolika
     /// paralelních vláknech po kouscích (převzato z Flash-iOS). Viz `ExpertPrefetcher.aheadReadFanout`.
-    /// Výchozí `F_RDADVISE`, dokud `pread` nezměří iPhone.
+    /// Měření (Qwen3-30B-A3B, k=6, 3 vlákna, 666 tokenů): F_RDADVISE 4,76 tok/s, pread ×1 2,97,
+    /// ×2 4,40, ×4 4,07 – pread nestíhá, stránky se pak nemapují předem a vlákna berou CPU výpočtu.
     var prefetchAheadFanout = 0
     /// Zaznamenávat, které experty router vybírá, a měřit zásah page cache (`mincore`).
     /// Záznam jde v Parametrech přehrát v simulátoru cache (`ExpertCacheSimulator`) nebo na

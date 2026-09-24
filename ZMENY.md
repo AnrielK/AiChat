@@ -1,3 +1,36 @@
+# Test: MoE z flash přes MLX (rozhodnutí před přepisem)
+
+- Parametry › Rychlost úložiště, u GGUF MoE: „Test: MoE z flash přes MLX“ (`MLXMoEProbe`). Napodobí
+  generování na GPU přes MLX s rozměry vybraného modelu (z metadat GGUF): husté váhy jsou nulové 4bitové
+  matice správné velikosti, experti se opravdu čtou ze souboru podle posledního záznamu expertů.
+- Tři běhy po 24 tokenech (+4 na zahřátí): GPU bez čekání, GPU s čekáním na router v každé vrstvě
+  a celý průchod se čtením expertů přes paralelní pread a kopií do MLX polí. Výsledek: cena čekání
+  na vrstvu, doba čtení a kopie na token a strop tok/s bez předčítání i s ideálním předčítáním.
+  Rozhodnutí: nad ~6 tok/s má přepis smysl (GGUF teď 4,6–5,2).
+
+---
+
+# GGUF MoE v RAM: počet aktivních expertů i bez streamování
+
+- „Aktivních expertů“ je teď vidět u každého GGUF MoE, i s vypnutým „Experty MoE z úložiště“ (model
+  celý v RAM, výpočet na Metalu). Dřív se přepis `expert_used_count` uplatnil jen při streamování.
+  Na GPU se neušetří čtení z flash, ale průchod vahami MoE vrstev. Log: „MoE v RAM: 6 z 128 expertů…“.
+- Hustý GGUF (třída GGUF) experty nemá, tam volba není.
+
+---
+
+# MLX: počet aktivních expertů u MoE modelů
+
+- Nastavení je uložené zvlášť pro každý typ modelu (GGUF MoE, GGUF, MLX), takže „Aktivních expertů“
+  z GGUF MoE na MLX nepůsobí. MLX má teď vlastní krokovač (Parametry › Délka, jen u MoE modelu –
+  pozná se podle `num_experts_per_tok` / `top_k_experts` v config.json).
+- mlx-swift-lm bere počet expertů z config.json a jinak ho přepsat nejde. Model se proto při sníženém
+  počtu načte ze stínové složky v Caches: upravený config.json + odkazy na váhy a tokenizér
+  (nic se nekopíruje). Změna počtu model znovu načte. RAM se neušetří (MLX drží všechny experty
+  v paměti), zrychlí se výpočet MoE vrstev. Log: „MoE: 6 z 8 expertů na token (sníženo)“.
+
+---
+
 # MoE: čtení odhadu přes paralelní pread (z Flash-iOS) a větší adresní prostor
 
 - **Čtení odhadu** (Parametry › Výkon, pod „Předčítat podle odhadu“): `F_RDADVISE` (výchozí, beze změny)
@@ -6,7 +39,13 @@
   pread a mmap sdílejí na iOS jednu cache souboru, takže výpočet stránky najde v paměti. Čtení běží
   na pozadí jako dosud; jakmile výpočet vrstvu předběhne, zbylé kousky se přeskočí (počítá se do
   „výpočet předběhl“). Doba v řádku „podle odhadu“ je u pread skutečná doba čtení, u F_RDADVISE jen
-  doba ohlášení. Nezměřeno – výchozí zůstává F_RDADVISE.
+  doba ohlášení.
+- **Měření** (Qwen3-30B-A3B, 6 expertů, 3 vlákna, odhad k, stejný dotaz, 666 tokenů):
+  F_RDADVISE 4,76 tok/s · pread ×1 2,97 · pread ×2 4,40 · pread ×4 4,07. pread je pomalejší ve všech
+  variantách. Čtení nestíhá (výpočet předběhl 34–66 % vrstev), pak se stránky už nenamapují předem
+  a výpadky „jen mapování“ vyskočí z 0,6 na 3,5–4,5 milionu. Vlákna čtení navíc kopírují data do
+  bufferu a berou jádra výpočtu. Flash-iOS z toho těží, protože pread u něj čte rovnou do bufferu,
+  se kterým počítá GPU; tady by to byla jen druhá kopie vedle mmapu llama.cpp. Výchozí zůstává F_RDADVISE.
 - **Entitlement `extended-virtual-addressing`** (AIChat i Sideload): llama.cpp mapuje celý GGUF;
   u modelů kolem 22 GB (Qwen3.6-35B-A3B Q4_K_M) se mapování nemusí vejít do výchozího adresního prostoru.
   Paměť nezabírá. Kdyby ho podpis nebo sideload nástroj odmítl, stačí klíč z `.entitlements` odebrat.

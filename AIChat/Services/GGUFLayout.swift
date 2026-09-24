@@ -248,6 +248,19 @@ struct GGUFLayout: Sendable, Equatable {
         return Int(name.dropFirst(4).prefix { $0.isNumber })
     }
 
+    /// Rozměry modelu z metadat: `<arch>.<klíč>` pro zadané klíče a velikost slovníku.
+    /// Chybějící klíč = 0. Pro modelování výpočtu v `MLXMoEProbe`.
+    static func dimensions(path: String, keys: [String]) -> (architecture: String, values: [String: Int], vocabulary: Int)? {
+        guard let context = gguf_init_from_file(path, gguf_init_params(no_alloc: true, ctx: nil)) else { return nil }
+        defer { gguf_free(context) }
+        let architecture = string(context, "general.architecture") ?? ""
+        var values: [String: Int] = [:]
+        for key in keys { values[key] = integer(context, "\(architecture).\(key)") }
+        let tokens = gguf_find_key(context, "tokenizer.ggml.tokens")
+        let vocabulary = tokens >= 0 ? Int(gguf_get_arr_n(context, tokens)) : 0
+        return (architecture, values, vocabulary)
+    }
+
     private static func string(_ context: OpaquePointer, _ key: String) -> String? {
         let id = gguf_find_key(context, key)
         guard id >= 0, gguf_get_kv_type(context, id) == GGUF_TYPE_STRING,

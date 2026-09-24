@@ -737,8 +737,9 @@ actor LlamaEngine {
         guard FileManager.default.fileExists(atPath: path) else {
             throw ProviderError.engine("Soubor modelu nebyl nalezen.")
         }
-        let layout = settings.streamExperts ? GGUFLayout.read(path: path) : nil
-        let stream = layout?.isMoE == true
+        // Rozložení souboru je potřeba pro streamování i pro snížení počtu expertů u MoE v RAM.
+        let layout = settings.streamExperts || settings.expertsPerToken > 0 ? GGUFLayout.read(path: path) : nil
+        let stream = settings.streamExperts && layout?.isMoE == true
 
         // Kde běží výpočet u streamovaného MoE. Měření na iPhonu (Qwen3-30B-A3B, 8 GB RAM):
         // jen CPU 3,3 tok/s, CPU + GPU 1,6–1,9 tok/s – střídání CPU a GPU ve 48 vrstvách
@@ -765,9 +766,10 @@ actor LlamaEngine {
 
         // Kolik expertů smí router vybrat. Objem čtení z úložiště je na tom lineárně závislý,
         // takže je to největší páka na rychlost, kterou lze otočit bez překvantování modelu.
-        // Přepisuje se jen dolů a jen u streamovaného MoE – zvyšovat nad hodnotu z metadat
-        // nemá smysl (model je trénovaný na své top-k) a u modelu v RAM to nic neušetří.
-        let expertUsed = Self.expertUsedOverride(settings: settings, layout: layout, streaming: stream)
+        // Přepisuje se jen dolů – zvyšovat nad hodnotu z metadat nemá smysl (model je trénovaný
+        // na své top-k). U MoE v RAM (na Metalu) se neušetří čtení z flash, ale výpočet
+        // a průchod pamětí MoE vrstev, na kterém generování na GPU stojí.
+        let expertUsed = Self.expertUsedOverride(settings: settings, layout: layout)
 
         let key = "\(path)|\(effectiveGPULayers)|\(stream)|\(repack?.matrices.count ?? 0)|\(expertUsed ?? 0)"
         if let model, key == loadedKey { return model }
@@ -839,6 +841,9 @@ actor LlamaEngine {
             repackedBytes: repackedBytes,
             expertUsed: expertUsed ?? layout?.expertUsed ?? 0
         )
+        if let expertUsed, let layout, !stream {
+            Self.log.notice("MoE v RAM: \(expertUsed) z \(layout.expertCount) expertů na vrstvu (sníženo z \(layout.expertUsed))")
+        }
         if let layout, stream {
             let placementNote = switch placement {
             case .cpuOnly: "jen CPU"
@@ -858,8 +863,8 @@ actor LlamaEngine {
     }
 
     /// Na kolik expertů na vrstvu se má model omezit. nil = nechat hodnotu z metadat.
-    private static func expertUsedOverride(settings: LocalModelSettings, layout: GGUFLayout?, streaming: Bool) -> Int? {
-        guard streaming, let layout, layout.expertUsed > 1, !layout.architecture.isEmpty else { return nil }
+    private static func expertUsedOverride(settings: LocalModelSettings, layout: GGUFLayout?) -> Int? {
+        guard let layout, layout.isMoE, layout.expertUsed > 1, !layout.architecture.isEmpty else { return nil }
         let requested = settings.expertsPerToken
         guard requested > 0, requested < layout.expertUsed else { return nil }
         return requested

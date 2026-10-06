@@ -15,6 +15,12 @@ public struct KeyFigures: Sendable {
             guard kind == .money || kind == .perShare, let c = current, let p = prior, p != 0 else { return nil }
             return c / p - 1
         }
+
+        /// Marže: rozdíl v procentních bodech (0.711 − 0.750 = −0.039).
+        public var marginChange: Double? {
+            guard kind == .percent, let c = current, let p = prior else { return nil }
+            return c - p
+        }
     }
 
     public let fiscalYear: Int
@@ -61,6 +67,23 @@ public struct KeyFigures: Sendable {
                               prior: v(revenueC, prior, dims: s.dims), kind: .money))
         }
         return KeyFigures(fiscalYear: period.fiscalYear, lines: lines.filter { $0.current != nil })
+    }
+
+    /// „$215.9B“, „71.1%“, „$4.90“, „n/a“.
+    static func format(_ v: Double?, _ k: Line.Kind) -> String {
+        guard let v else { return "n/a" }
+        switch k {
+        case .money: return String(format: "$%.1fB", v / 1e9)
+        case .percent: return String(format: "%.1f%%", v * 100)
+        case .perShare: return String(format: "$%.2f", v)
+        }
+    }
+
+    /// Meziroční změna: částky v %, marže v procentních bodech.
+    static func changeText(_ l: Line) -> String {
+        if let c = l.change { return String(format: "%+.0f%%", c * 100) }
+        if let d = l.marginChange { return String(format: "%+.1f p.b.", d * 100) }
+        return ""
     }
 
     /// Plain-text table used in prompts and in the summary sheet.

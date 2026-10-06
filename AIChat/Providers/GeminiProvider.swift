@@ -25,63 +25,94 @@ struct GeminiProvider: ChatProvider {
                     // Okno a max. odpověď modelu (endpoint models/{id}, jednou za týden).
                     await store.refreshModelInfo(provider: .gemini, model: model, apiKey: apiKey)
                     // Gemini limity tarifu neposílá v hlavičkách, jen v chybě 429 (QuotaFailure).
-                    let inspect: @Sendable (HTTPURLResponse, Data?) async -> Void = { _, body in
+                    let inspect: @Sendable (HTTPURLResponse, Data?) async -> Void = { response, body in
+                        // Zbývající limity Gemini neposílá – zapíše se aspoň odeslaný dotaz (počítadlo).
+                        await RateLimitStatusStore.shared.record(provider: .gemini, model: model, response: response)
                         await Self.recordTier(from: body, model: model)
                     }
 
                     var plan = await store.plan(provider: .gemini, model: model, requestedMaxTokens: maxTokens, adaptToTier: adaptToTier, tierInputPerMinute: tierInputPerMinute)
                     var fitted = ChatTurn.fittingCloud(history, tokenBudget: plan.inputTokenBudget, systemPrompt: systemPrompt, charactersPerToken: plan.charactersPerToken)
 
-                    // Požadavek se staví až tady – čtení a base64 příloh nemá blokovat hlavní vlákno.
-                    let bytes: URLSession.AsyncBytes
-                    do {
-                        bytes = try await HTTPStreaming.open(makeRequest(fitted.turns, plan: plan), inspect: inspect)
-                    } catch let error as ProviderError {
-                        // 429 kvůli velikosti promptu (typicky free tier): limit teď známe z chyby,
-                        // jeden pokus s promptem zmenšeným na něj. Jinak (vyčerpaný limit) chyba.
-                        guard case .http(let status, _) = error, status == 429, adaptToTier else { throw error }
-                        // Skutečný limit z API má přednost před vybraným tarifem (tarif mohl být zvolen špatně).
-                        let smaller = await store.plan(provider: .gemini, model: model, requestedMaxTokens: maxTokens, adaptToTier: true)
-                        guard smaller.inputTokenBudget < plan.inputTokenBudget else { throw error }
-                        plan = smaller
-                        fitted = ChatTurn.fittingCloud(history, tokenBudget: plan.inputTokenBudget, systemPrompt: systemPrompt, charactersPerToken: plan.charactersPerToken)
-                        bytes = try await HTTPStreaming.open(makeRequest(fitted.turns, plan: plan), inspect: inspect)
-                    }
+                    // Přetížený model (503 „high demand“) bývá jen chvilkový – zkusí se znovu
+                    // s rostoucí prodlevou, dokud z odpovědi ještě nic nepřišlo.
+                    var attempt = 0
+                    while true {
+                        var producedOutput = false
+                        do {
+                            // Požadavek se staví až tady – čtení a base64 příloh nemá blokovat hlavní vlákno.
+                            let bytes: URLSession.AsyncBytes
+                            do {
+                                bytes = try await HTTPStreaming.open(makeRequest(fitted.turns, plan: plan), inspect: inspect)
+                            } catch let error as ProviderError {
+                                // 429 kvůli velikosti promptu (typicky free tier): limit teď známe z chyby,
+                                // jeden pokus s promptem zmenšeným na něj. Jinak (vyčerpaný limit) chyba.
+                                guard case .http(let status, _) = error, status == 429, adaptToTier else { throw error }
+                                // Skutečný limit z API má přednost před vybraným tarifem (tarif mohl být zvolen špatně).
+                                let smaller = await store.plan(provider: .gemini, model: model, requestedMaxTokens: maxTokens, adaptToTier: true)
+                                guard smaller.inputTokenBudget < plan.inputTokenBudget else { throw error }
+                                plan = smaller
+                                fitted = ChatTurn.fittingCloud(history, tokenBudget: plan.inputTokenBudget, systemPrompt: systemPrompt, charactersPerToken: plan.charactersPerToken)
+                                bytes = try await HTTPStreaming.open(makeRequest(fitted.turns, plan: plan), inspect: inspect)
+                            }
 
-                    var usage = TokenUsage(
-                        promptTokens: 0,
-                        outputTokens: 0,
-                        contextWindow: plan.effectiveWindow,
-                        maxOutputTokens: plan.maxOutputTokens,
-                        droppedHistory: fitted.dropped,
-                        modelContextWindow: plan.modelWindow
-                    )
-                    for try await line in bytes.lines {
-                        guard let event = HTTPStreaming.event(fromLine: line) else { continue }
+                            var usage = TokenUsage(
+                                promptTokens: 0,
+                                outputTokens: 0,
+                                contextWindow: plan.effectiveWindow,
+                                maxOutputTokens: plan.maxOutputTokens,
+                                droppedHistory: fitted.dropped,
+                                modelContextWindow: plan.modelWindow
+                            )
+                            for try await line in bytes.lines {
+                                guard let event = HTTPStreaming.event(fromLine: line) else { continue }
 
-                        // Počty tokenů chodí v usageMetadata (průběžně, poslední kus je konečný).
-                        if let metadata = event["usageMetadata"] as? [String: Any] {
-                            func count(_ key: String) -> Int { (metadata[key] as? NSNumber)?.intValue ?? 0 }
-                            usage.promptTokens = count("promptTokenCount")
-                            usage.outputTokens = count("candidatesTokenCount") + count("thoughtsTokenCount")
-                            continuation.yield(.usage(usage))
-                        }
+                                // Počty tokenů chodí v usageMetadata (průběžně, poslední kus je konečný).
+                                if let metadata = event["usageMetadata"] as? [String: Any] {
+                                    func count(_ key: String) -> Int { (metadata[key] as? NSNumber)?.intValue ?? 0 }
+                                    usage.promptTokens = count("promptTokenCount")
+                                    usage.outputTokens = count("candidatesTokenCount") + count("thoughtsTokenCount")
+                                    continuation.yield(.usage(usage))
+                                }
 
-                        if let error = event["error"] as? [String: Any] {
-                            throw ProviderError.api(error["message"] as? String ?? "Neznámá chyba")
-                        }
-                        if let feedback = event["promptFeedback"] as? [String: Any],
-                           let reason = feedback["blockReason"] as? String {
-                            throw ProviderError.api("Gemini požadavek zablokoval (\(reason)).")
-                        }
-                        guard let candidates = event["candidates"] as? [[String: Any]],
-                              let content = candidates.first?["content"] as? [String: Any],
-                              let parts = content["parts"] as? [[String: Any]] else { continue }
+                                if let error = event["error"] as? [String: Any] {
+                                    // Chyba uprostřed streamu (HTTP 200) – kód 503/UNAVAILABLE se dá zopakovat.
+                                    let message = error["message"] as? String ?? "Neznámá chyba"
+                                    if let code = (error["code"] as? NSNumber)?.intValue, code >= 400 {
+                                        throw ProviderError.http(status: code, message: message)
+                                    }
+                                    if (error["status"] as? String) == "UNAVAILABLE" {
+                                        throw ProviderError.http(status: 503, message: message)
+                                    }
+                                    throw ProviderError.api(message)
+                                }
+                                if let feedback = event["promptFeedback"] as? [String: Any],
+                                   let reason = feedback["blockReason"] as? String {
+                                    throw ProviderError.api("Gemini požadavek zablokoval (\(reason)).")
+                                }
+                                guard let candidates = event["candidates"] as? [[String: Any]],
+                                      let content = candidates.first?["content"] as? [String: Any],
+                                      let parts = content["parts"] as? [[String: Any]] else { continue }
 
-                        for part in parts {
-                            guard let text = part["text"] as? String else { continue }
-                            // Shrnutí přemýšlení má příznak thought == true.
-                            continuation.yield((part["thought"] as? Bool) == true ? .reasoning(text) : .text(text))
+                                for part in parts {
+                                    guard let text = part["text"] as? String else { continue }
+                                    // Shrnutí přemýšlení má příznak thought == true.
+                                    let isThought = (part["thought"] as? Bool) == true
+                                    // Jen text odpovědi brání opakování; přemýšlení se při novém pokusu
+                                    // vypíše znovu, což je menší zlo než celou analýzu vzdát.
+                                    if !isThought { producedOutput = true }
+                                    continuation.yield(isThought ? .reasoning(text) : .text(text))
+                                }
+                            }
+                            break
+                        } catch {
+                            // Když už část textu odpovědi dorazila, opakování by ho zdvojilo – chyba jde dál.
+                            guard !producedOutput, !Task.isCancelled, HTTPStreaming.isTransient(error) else { throw error }
+                            guard attempt < Self.retryDelays.count else { throw Self.overloaded(error, model: model, attempts: attempt + 1) }
+                            let delay = Self.retryDelays[attempt]
+                            attempt += 1
+                            continuation.yield(.status("\nGemini (\(model)) je přetížený, zkouším znovu za \(delay) s (pokus \(attempt + 1)/\(Self.retryDelays.count + 1)).\n"))
+                            try await Task.sleep(nanoseconds: UInt64(delay) * 1_000_000_000)
                         }
                     }
                     continuation.finish()
@@ -91,6 +122,18 @@ struct GeminiProvider: ChatProvider {
             }
             continuation.onTermination = { _ in task.cancel() }
         }
+    }
+
+    /// Prodlevy (s) mezi opakováními při přetížení – celkem ~35 s, pak se to vzdá.
+    static let retryDelays = [3, 8, 20]
+
+    /// Po vyčerpání pokusů srozumitelná hláška: chyba je u Googlu, ne v klíči ani v aplikaci.
+    private static func overloaded(_ error: Error, model: String, attempts: Int) -> Error {
+        guard case .http(let status, let message)? = error as? ProviderError, status == 503 else { return error }
+        return ProviderError.http(
+            status: status,
+            message: "\(message)\n\nModel \(model) je teď přetížený na straně Googlu (zkoušeno \(attempts)×). Klíč i připojení jsou v pořádku – zkus to za chvíli, nebo přepni na jiný model (např. starší Flash nebo Pro)."
+        )
     }
 
     /// Limit tarifu z chyby 429: `QuotaFailure.violations` s `quotaId`

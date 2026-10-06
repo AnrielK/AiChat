@@ -16,16 +16,19 @@ public struct PlannedWrite: Sendable, Identifiable {
     public var range: String { A1.cell(sheet, column, row) }
 }
 
-/// A year column that does not exist yet and will be created right after the previous year:
+/// A year column that does not exist yet and will be created next to the previous year:
 /// insert a column (inherits width), copy the previous column with formulas and formatting
 /// (relative references shift: `=N3+N4` → `=O3+O4`, `=N2+1` → `=O2+1`), then empty the cells
 /// that held the previous year's typed-in numbers.
+///
+/// Sešit s nejnovějším rokem vlevo: nový sloupec se vloží *před* dosavadní nejnovější rok
+/// (na jeho místo), ten se posune doprava a kopíruje se z něj (`=H37-I37` → `=G37-H37`).
 public struct ColumnCreation: Sendable, Identifiable {
     public var id: String { sheet }
     public let sheet: String
     public let sheetId: Int
-    public let sourceIndex: Int           // 0-based, previous year
-    public let targetIndex: Int           // 0-based, new column
+    public let sourceIndex: Int           // 0-based, previous year (po vložení nového sloupce)
+    public let targetIndex: Int           // 0-based, new column (= místo vložení)
     public let year: Int
     public let headerRow: Int
     /// 1-based rows emptied after the copy: typed-in values and formulas without cell references
@@ -33,6 +36,8 @@ public struct ColumnCreation: Sendable, Identifiable {
     public let clearRows: [Int]
     /// Header was a typed-in year (not `=N2+1`), so the new year is written explicitly.
     public let setHeader: Bool
+    /// Formát a šířku převzít ze sloupce vlevo (staré roky vlevo), jinak zprava.
+    public var inheritFromBefore = true
 
     public var sourceColumn: String { A1.column(sourceIndex) }
     public var column: String { A1.column(targetIndex) }
@@ -42,7 +47,7 @@ public struct ColumnCreation: Sendable, Identifiable {
         [
             ["insertDimension": [
                 "range": ["sheetId": sheetId, "dimension": "COLUMNS", "startIndex": targetIndex, "endIndex": targetIndex + 1],
-                "inheritFromBefore": true,
+                "inheritFromBefore": inheritFromBefore,
             ] as [String: Any]],
             ["copyPaste": [
                 "source": ["sheetId": sheetId, "startColumnIndex": sourceIndex, "endColumnIndex": sourceIndex + 1],
@@ -93,6 +98,14 @@ public enum SheetPlanner {
         headerRow.firstIndex { Self.year($0) == year }
     }
 
+    /// Nejnovější rok je vlevo od nejstaršího (výkazy seřazené od aktuálního roku).
+    public static func isNewestFirst(header: [Any]) -> Bool {
+        let years = header.enumerated().compactMap { i, v in year(v).map { (index: i, year: $0) } }
+        guard let newest = years.max(by: { $0.year < $1.year }),
+              let oldest = years.min(by: { $0.year < $1.year }), newest.year != oldest.year else { return false }
+        return newest.index < oldest.index
+    }
+
     /// Treats empty cells and 0 placeholders as empty.
     static func isEmpty(_ v: Any?) -> Bool {
         guard let v else { return true }
@@ -138,6 +151,12 @@ public enum SheetPlanner {
 
         let headerSource = sourceColumn.indices.contains(headerRow - 1) ? sourceColumn[headerRow - 1] : nil
         let headerIsFormula = (headerSource as? String).map { $0.hasPrefix("=") && referencesCells($0) } ?? false
+        if isNewestFirst(header: header) {
+            // Vložit na místo nejnovějšího roku; ten se posune o sloupec doprava a je zdrojem kopie.
+            return ColumnCreation(sheet: sheet, sheetId: sheetId, sourceIndex: last.index + 1, targetIndex: last.index,
+                                  year: year, headerRow: headerRow, clearRows: clear.sorted(), setHeader: !headerIsFormula,
+                                  inheritFromBefore: false)
+        }
         return ColumnCreation(sheet: sheet, sheetId: sheetId, sourceIndex: last.index, targetIndex: last.index + 1,
                               year: year, headerRow: headerRow, clearRows: clear.sorted(), setHeader: !headerIsFormula)
     }
@@ -158,8 +177,10 @@ public enum SheetPlanner {
 
         var columns: [String: Int] = [:]
         var toCreate: [(name: String, header: [Any])] = []
+        var newestFirst: Set<String> = []
         for (i, name) in names.enumerated() {
             let header = headers[safe: i]?.first ?? []
+            if isNewestFirst(header: header) { newestFirst.insert(name) }
             if let col = yearColumn(headerRow: header, year: period.fiscalYear) { columns[name] = col }
             else { toCreate.append((name, header)) }
         }
@@ -199,16 +220,20 @@ public enum SheetPlanner {
                 for (r, rowValues) in (current[safe: i] ?? []).enumerated() { existing[name, default: [:]][r + 1] = rowValues.first }
             }
         }
-        return SheetPlan(writes: plan(rows: rows, columns: columns, existing: existing, overwrite: overwrite),
+        return SheetPlan(writes: plan(rows: rows, columns: columns, existing: existing, overwrite: overwrite,
+                                      newestFirst: newestFirst),
                          newColumns: creations)
     }
 
     /// Pure planning step (unit-testable without network).
+    /// - Parameter newestFirst: listy s nejnovějším rokem vlevo – předchozí rok (`{prev}`) je
+    ///   tam o sloupec *vpravo*.
     public static func plan(rows: [ResolvedRow], columns: [String: Int], existing: [String: [Int: Any]],
-                            overwrite: Bool) -> [PlannedWrite] {
+                            overwrite: Bool, newestFirst: Set<String> = []) -> [PlannedWrite] {
         rows.map { r in
             let colIndex = columns[r.spec.sheet] ?? 0
-            let col = A1.column(colIndex), prev = A1.column(max(colIndex - 1, 0))
+            let prevIndex = newestFirst.contains(r.spec.sheet) ? colIndex + 1 : max(colIndex - 1, 0)
+            let col = A1.column(colIndex), prev = A1.column(prevIndex)
             let old = existing[r.spec.sheet]?[r.spec.row]
             let oldText = old.map { "\($0)" }
             let content = MappingResolver.content(for: r, column: col, previousColumn: prev)

@@ -18,16 +18,17 @@ public enum WorkbookFiller {
     }
 
     /// - Parameters:
-    ///   - firstYear: fiscal year of the first year column (`yearColumns.first`).
+    ///   - firstYear: nejstarší rok bloku (vlevo, nebo s `newestFirst` vpravo).
     ///   - periods: available fiscal years (from `FactStore.annualPeriods`).
+    ///   - newestFirst: nejnovější rok v prvním sloupci bloku, starší doprava (`SpreadsheetTemplate.newestFirst()`).
     public static func plan(mapping: TemplateMapping, facts: FactStore, periods: [FiscalPeriod],
-                            firstYear: Int, firstColumn: Int, columnCount: Int) -> Plan {
+                            firstYear: Int, firstColumn: Int, columnCount: Int, newestFirst: Bool = false) -> Plan {
         var writes: [PlannedWrite] = []
         var years: [YearResult] = []
         for period in periods.sorted(by: { $0.fiscalYear < $1.fiscalYear }) {
             let offset = period.fiscalYear - firstYear
             guard (0..<columnCount).contains(offset) else { continue }
-            let col = firstColumn + offset
+            let col = column(offset: offset, firstColumn: firstColumn, columnCount: columnCount, newestFirst: newestFirst)
             var rows = MappingResolver.resolve(mapping, facts: facts, period: period)
             let checks = Validator.reconcile(mapping, rows: &rows, facts: facts, period: period)
             // Year with a failed check is left empty rather than half right.
@@ -39,7 +40,8 @@ public enum WorkbookFiller {
             let withData = MappingResolver.sheetsWithData(rows)
             let usable = rows.filter { withData.contains($0.spec.sheet) && (offset > 0 || $0.spec.formula == nil) }
             let columns = Dictionary(uniqueKeysWithValues: mapping.sheets.map { ($0, col) })
-            let planned = SheetPlanner.plan(rows: usable, columns: columns, existing: [:], overwrite: true)
+            let planned = SheetPlanner.plan(rows: usable, columns: columns, existing: [:], overwrite: true,
+                                            newestFirst: newestFirst ? Set(mapping.sheets) : [])
                 .filter { $0.action == .write }
             writes += planned
             // Opening values for formula rows of the first column (cash at beginning of period).
@@ -55,5 +57,10 @@ public enum WorkbookFiller {
             years.append(YearResult(fiscalYear: period.fiscalYear, column: A1.column(col), checks: checks, cells: planned.count))
         }
         return Plan(writes: writes, years: years)
+    }
+
+    /// 0-based sloupec roku: `offset` = roky od nejstaršího v bloku.
+    public static func column(offset: Int, firstColumn: Int, columnCount: Int, newestFirst: Bool) -> Int {
+        newestFirst ? firstColumn + columnCount - 1 - offset : firstColumn + offset
     }
 }

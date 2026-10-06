@@ -370,6 +370,26 @@ final class SegmentTests: XCTestCase {
         XCTAssertEqual(SegmentExtractor.label("aapl:WearablesHomeandAccessoriesMember"), "Wearables Home & Accessories")
     }
 
+    /// Starší 10-K má jiný identifikátor stejného segmentu – musí to být jeden řádek.
+    func testRenamedMembersMerge() {
+        let axis = "us-gaap:StatementBusinessSegmentsAxis"
+        func fact(_ member: String, _ value: Double, _ start: String, _ end: String) -> Fact {
+            Fact(concept: "us-gaap:Revenues", value: value, unit: "USD", start: start, end: end,
+                 dimensions: [axis: member], source: .inlineXBRL)
+        }
+        let facts = [   // nejnovější 10-K první
+            fact("nvda:ComputeAndNetworkingSegmentMember", 47_405e6, "2023-01-30", "2024-01-28"),
+            fact("nvda:GraphicsSegmentMember", 13_517e6, "2023-01-30", "2024-01-28"),
+            fact("nvda:ComputeAndNetworkingMember", 15_068e6, "2022-01-31", "2023-01-29"),
+            fact("nvda:GraphicsMember", 11_906e6, "2022-01-31", "2023-01-29"),
+        ]
+        let periods = [FiscalPeriod(fiscalYear: 2024, endDate: "2024-01-28"), FiscalPeriod(fiscalYear: 2023, endDate: "2023-01-29")]
+        let group = SegmentExtractor.extract(facts: facts, periods: periods).first { $0.axis == axis }
+        XCTAssertEqual(group?.lines.map(\.name), ["Compute & Networking", "Graphics"])
+        XCTAssertEqual(group?.lines.first?.values, [2024: 47_405e6, 2023: 15_068e6])
+        XCTAssertEqual(group?.lines.first?.member, "nvda:ComputeAndNetworkingSegmentMember")
+    }
+
     func testExtractNVDA() throws {
         let periods = f.facts.annualPeriods(latest: f.period, count: 9)
         let groups = SegmentExtractor.extract(facts: f.segmentFacts, periods: periods)
@@ -425,5 +445,144 @@ final class SegmentTests: XCTestCase {
         XCTAssertEqual(cell("B11")?["stringValue"] as? String, "Segmenty – meziroční změna")
         XCTAssertEqual(cell("O12")?["formulaValue"] as? String, "=IF(OR(N5=\"\",O5=\"\",N(N5)=0),\"\",O5/N5-1)")
         XCTAssertNil(cell("G12"))                       // no YoY in the first column
+    }
+}
+
+/// Výkazy od nejnovějšího roku (vlevo) ke starším (doprava) a list Souhrn.
+final class NewestFirstTests: XCTestCase {
+    func cell(_ t: SpreadsheetTemplate, _ sheet: String, _ address: String) -> SpreadsheetTemplate.Cell? {
+        t.sheets.first { $0.title == sheet }?.cells.first { $0.a == address }
+    }
+
+    func testTemplateMirrored() throws {
+        let original = try SpreadsheetTemplate.bundledUniversal()
+        let t = original.newestFirst()
+        // Nejstarší rok vpravo (O), roky rostou doleva.
+        XCTAssertEqual(cell(t, "IncomeStatement", "O2")?.v, "{{FY_FIRST}}")
+        XCTAssertEqual(cell(t, "IncomeStatement", "N2")?.f, "=O2+1")
+        XCTAssertEqual(cell(t, "IncomeStatement", "G2")?.f, "=H2+1")
+        // „Tento rok − předchozí“ míří na sloupec vpravo.
+        XCTAssertEqual(cell(t, "BalanceSheets", "G38")?.f, "=G37-H37")
+        XCTAssertNil(cell(t, "BalanceSheets", "O38")?.f)
+        // Počáteční hotovost = konec předchozího roku (vpravo).
+        XCTAssertEqual(cell(t, "CashFlowStatement", "H28")?.f, "=I30")
+        // Vzorce v jednom sloupci zůstanou ve svém sloupci.
+        XCTAssertEqual(cell(t, "IncomeStatement", "O11")?.f, "=O8-SUM(O9:O10)")
+        // DCF hledá podle roku – rozsah začíná o sloupec dřív, aby nový rok vložený do G byl uvnitř.
+        XCTAssertEqual(cell(t, "DCF", "D21")?.f, "=MAX(IncomeStatement!$F$2:$Z$2)-4")
+        XCTAssertEqual(cell(t, "DCF", "H4")?.f, cell(original, "DCF", "H4")?.f)
+        // Stejný počet buněk, jen jinde.
+        for (a, b) in zip(original.sheets, t.sheets) { XCTAssertEqual(a.cells.count, b.cells.count, a.title) }
+    }
+
+    func testMirrorFormulaSkipsTextAndFunctions() {
+        let f = SpreadsheetTemplate.mirrorFormula(#"=IF(G5>0,"G5 text",LOG10(G5))+'Income Statement'!H3"#,
+                                                  ownSheet: "IncomeStatement", yearSheets: ["IncomeStatement", "Income Statement"],
+                                                  first: 6, last: 14)
+        XCTAssertEqual(f, #"=IF(O5>0,"G5 text",LOG10(O5))+'Income Statement'!N3"#)
+        // Odkaz na list bez let se nemění.
+        XCTAssertEqual(SpreadsheetTemplate.mirrorFormula("=DCF!G5", ownSheet: "IncomeStatement", yearSheets: ["IncomeStatement"],
+                                                         first: 6, last: 14), "=DCF!G5")
+    }
+
+    func testFillerColumnsNewestFirst() {
+        XCTAssertEqual(WorkbookFiller.column(offset: 0, firstColumn: 6, columnCount: 9, newestFirst: true), 14)
+        XCTAssertEqual(WorkbookFiller.column(offset: 8, firstColumn: 6, columnCount: 9, newestFirst: true), 6)
+        XCTAssertEqual(WorkbookFiller.column(offset: 8, firstColumn: 6, columnCount: 9, newestFirst: false), 14)
+    }
+
+    func testOrientationFromHeader() {
+        XCTAssertTrue(SheetPlanner.isNewestFirst(header: ["", "", "", "", "", "", 2026.0, 2025.0, 2024.0]))
+        XCTAssertFalse(SheetPlanner.isNewestFirst(header: ["", "", "", "", "", "", 2024.0, 2025.0, 2026.0]))
+        XCTAssertFalse(SheetPlanner.isNewestFirst(header: ["x", 2026.0]))
+    }
+
+    func testColumnCreationNewestFirst() throws {
+        // G = 2022 (nejnovější), H = 2021, … ; nový rok 2023 se vloží do G a kopíruje se z posunutého H.
+        let header: [Any] = ["x", "Income Statement", "", "", "", "", 2022.0, 2021.0, 2020.0]
+        var source = [Any?](repeating: nil, count: 30)
+        source[1] = "=H2+1"
+        source[2] = 100.0
+        let c = try SheetPlanner.columnCreation(sheet: "IncomeStatement", sheetId: 7, header: header, year: 2023,
+                                                headerRow: 2, sourceColumn: source, mappedRows: [3])
+        XCTAssertEqual(c.column, "G")
+        XCTAssertEqual(c.sourceColumn, "H")
+        XCTAssertFalse(c.setHeader)
+        let req = c.requests()
+        let insert = req[0]["insertDimension"] as! [String: Any]
+        XCTAssertEqual((insert["range"] as! [String: Any])["startIndex"] as? Int, 6)
+        XCTAssertEqual(insert["inheritFromBefore"] as? Bool, false)
+        let copy = req[1]["copyPaste"] as! [String: Any]
+        XCTAssertEqual((copy["source"] as! [String: Any])["startColumnIndex"] as? Int, 7)
+        XCTAssertEqual((copy["destination"] as! [String: Any])["startColumnIndex"] as? Int, 6)
+    }
+
+    func testPreviousColumnIsToTheRight() {
+        let f = FinFillCoreTests.filing
+        var rows = MappingResolver.resolve(FinFillCoreTests.mapping, facts: f.facts, period: f.period)
+        Validator.reconcile(FinFillCoreTests.mapping, rows: &rows, facts: f.facts, period: f.period)
+        let sheets = ["IncomeStatement", "BalanceSheets", "CashFlowStatement"]
+        let plan = SheetPlanner.plan(rows: rows, columns: Dictionary(uniqueKeysWithValues: sheets.map { ($0, 6) }),
+                                     existing: [:], overwrite: false, newestFirst: Set(sheets))
+        XCTAssertEqual(plan.first { $0.id == "'CashFlowStatement'!G28" }?.content, .formula("=H30"))
+    }
+
+    func testSummaryMarkdownLines() {
+        let lines = SummarySheet.markdownLines("## Key risks\n\n\n- **Export** controls\n* China\nPlain text\n\n")
+        XCTAssertEqual(lines.map(\.text), ["Key risks", "", "•  Export controls", "•  China", "Plain text"])
+    }
+
+    func testSummarySheetIsFirstAndOverwritten() {
+        let result = Summarizer.Result(sections: [(item: "1", title: "Business", summary: "- A")],
+                                       executiveSummary: "Text",
+                                       keyFigures: KeyFigures(fiscalYear: 2026, lines: [
+                                           .init(name: "Revenue", current: 215.9e9, prior: 130.5e9, kind: .money)]))
+        let fresh = SummarySheet.requests(result, company: "NVIDIA", title: "Souhrn", existingSheetId: nil, newSheetId: 5)
+        let add = (fresh[0]["addSheet"] as! [String: Any])["properties"] as! [String: Any]
+        XCTAssertEqual(add["index"] as? Int, 0)
+        XCTAssertEqual(add["title"] as? String, "Souhrn")
+
+        // Druhý souhrn: starý list pryč, nový na prvním místě, podklady sbalené.
+        let again = SummarySheet.requests(result, company: "NVIDIA", title: "Souhrn", existingSheetId: 9, newSheetId: 5)
+        XCTAssertEqual((again[0]["deleteSheet"] as! [String: Any])["sheetId"] as? Int, 9)
+        let props = (again[1]["addSheet"] as! [String: Any])["properties"] as! [String: Any]
+        XCTAssertEqual(props["index"] as? Int, 0)
+        let group = again.last?["updateDimensionGroup"] as? [String: Any]
+        XCTAssertEqual((group?["dimensionGroup"] as? [String: Any])?["collapsed"] as? Bool, true)
+    }
+
+    func testBriefParsing() throws {
+        let text = """
+        **THESIS:** NVIDIA sells accelerated computing platforms; data center drove record growth.
+        CHANGES:
+        - Revenue up 65 % to $215.9B
+        1. Blackwell ramp
+        DRIVERS:
+        * Data center compute
+        RISKS:
+        - Export controls on China
+        - Customer concentration
+        - Supply from TSMC
+        - Fourth risk is cut
+        CAPITAL:
+        - n/a
+        Výhled: Revenue guidance for Q1 not given
+        VALUATION:
+        - Gross margin sustainability
+        """
+        let brief = try XCTUnwrap(SummaryBrief.parse(text))
+        XCTAssertEqual(brief[.thesis], ["NVIDIA sells accelerated computing platforms; data center drove record growth."])
+        XCTAssertEqual(brief[.changes], ["Revenue up 65 % to $215.9B", "Blackwell ramp"])
+        XCTAssertEqual(brief[.risks].count, 3)                    // max 3
+        XCTAssertEqual(brief[.capital], [])                       // n/a → prázdné
+        XCTAssertEqual(brief[.outlook], ["Revenue guidance for Q1 not given"])   // přeložená značka
+        XCTAssertNil(SummaryBrief.parse("Just a paragraph of text without the template."))
+        // „Risks of …“ uprostřed textu není nadpis.
+        XCTAssertNil(SummaryBrief.header("Risks of the business are high"))
+    }
+
+    func testPromptListsAllSections() {
+        let p = SummaryBrief.prompt(company: "NVIDIA", fiscalYear: 2026, language: "Czech", keyFigures: "- Revenue", sections: "x")
+        for s in SummaryBrief.Section.allCases { XCTAssertTrue(p.contains(s.rawValue + ":"), s.rawValue) }
     }
 }

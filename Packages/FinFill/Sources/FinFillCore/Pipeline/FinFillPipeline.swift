@@ -66,7 +66,11 @@ public struct FinFillPipeline: Sendable {
         public var dryRun = true                       // plan only, do not write
         public var writeEvenIfChecksFail = false
         public var backtestPriorYear = true
-        public var summarySheetPrefix: String? = "Summary FY"   // nil = don't write the summary to Sheets
+        /// List se souhrnem: vždy první v sešitu, nový souhrn ho přepíše. nil = souhrn do Sheets nepsat.
+        public var summarySheetTitle: String? = "Souhrn"
+        /// Nový sešit: nejnovější rok v prvním sloupci výkazů, starší doprava.
+        /// (Existující sešit si pořadí nese sám – pozná se z hlavičky.)
+        public var newestFirst = true
         /// Sheet "Segments": revenue by segment / market / region, YoY change, share (rebuilt on write).
         public var segments = true
         public var summaryOptions = Summarizer.Options()
@@ -237,7 +241,7 @@ public struct FinFillPipeline: Sendable {
         return Validator.compare(rows: rows.filter { used.contains($0.spec.sheet) }, existing: existing)
     }
 
-    /// Summary by the engine (if any); written to the sheet "Summary FY<year>" when `write`.
+    /// Summary by the engine (if any); written to the first sheet `summarySheetTitle` when `write`.
     func summarize(filing: PreparedFiling, sheets: GoogleSheetsClient, write: Bool,
                    log: @escaping @Sendable (Event) -> Void) async throws -> Summarizer.Result? {
         guard let engine, let html = filing.filingHTML else { return nil }
@@ -248,17 +252,21 @@ public struct FinFillPipeline: Sendable {
         let kf = KeyFigures.compute(facts: filing.facts, period: filing.period, prior: filing.prior, segments: segments)
         let result = try await Summarizer(engine: engine, options: config.summaryOptions)
             .summarize(filingHTML: html, company: filing.company, keyFigures: kf) { p in log(.summary(p)) }
-        if write, let prefix = config.summarySheetPrefix {
-            try await writeSummary(result, title: "\(prefix)\(filing.period.fiscalYear)", company: filing.company, sheets: sheets)
-            log(.log("Souhrn zapsán na list „\(prefix)\(filing.period.fiscalYear)“"))
+        if write, let title = config.summarySheetTitle {
+            try await writeSummary(result, title: title, company: filing.company, sheets: sheets)
+            log(.log("Souhrn zapsán na list „\(title)“ (první list sešitu)"))
         }
         return result
     }
 
+    /// Jeden list se souhrnem na prvním místě sešitu; existující se vyčistí a přepíše.
     func writeSummary(_ s: Summarizer.Result, title: String, company: String, sheets: GoogleSheetsClient) async throws {
-        let titles = try await sheets.sheetTitles()
-        if !titles.contains(title) { try await sheets.addSheet(title: title) } else { try await sheets.clear(range: "\(A1.quote(title))!A:A") }
-        let lines = s.markdown(company: company).components(separatedBy: "\n")
-        try await sheets.writeColumn(range: "\(A1.quote(title))!A1", lines: lines)
+        let info = try await sheets.sheetInfo()
+        let usedIds = Set(info.map(\.sheetId))
+        var newId = Int.random(in: 100_000...900_000)
+        while usedIds.contains(newId) { newId = Int.random(in: 100_000...900_000) }
+        try await sheets.structuralUpdate(SummarySheet.requests(
+            s, company: company, title: title,
+            existingSheetId: info.first { $0.title == title }?.sheetId, newSheetId: newId))
     }
 }

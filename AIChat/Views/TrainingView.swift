@@ -141,13 +141,13 @@ struct TrainingView: View {
             Text("Dataset")
         } footer: {
             Text(hasTeacher
-                 ? "Učitel (Claude nebo Gemini) projde vybrané odpovědi lokálního modelu, ohodnotí je a napíše, jak měly vypadat. Platí se za API jen při tomhle kroku. Hotová data jdou místo toho načíst z Hugging Face nebo ze souboru."
-                 : "Pro sběr vzorků učitelem doplň API klíč pro Claude nebo Gemini v Nastavení. Hotový dataset jde načíst i bez toho.")
+                 ? "Učitel (Claude, Gemini nebo ChatGPT) projde vybrané odpovědi lokálního modelu, ohodnotí je a napíše, jak měly vypadat. Platí se za API jen při tomhle kroku. Hotová data jdou místo toho načíst z Hugging Face nebo ze souboru."
+                 : "Pro sběr vzorků učitelem doplň API klíč pro Claude, Gemini nebo ChatGPT v Nastavení. Hotový dataset jde načíst i bez toho.")
         }
     }
 
     private var hasTeacher: Bool {
-        settings.isConnected(.claude) || settings.isConnected(.gemini)
+        AIProvider.cloud.contains(where: settings.isConnected)
     }
 
     // MARK: - Parametry
@@ -351,8 +351,80 @@ struct TrainingSamplesView: View {
     @Query(sort: \TrainingSample.createdAt, order: .reverse)
     private var allSamples: [TrainingSample]
 
+    @State private var pendingDeletion: SampleDeletion?
+
     private var samples: [TrainingSample] {
         allSamples.filter { $0.modelID == modelID }
+    }
+
+    /// Co se má hromadně smazat. Importované vzorky se poznají podle zdroje
+    /// v `teacherModel` – import ho zapisuje jako `hf:<dataset>` nebo `file:<soubor>`.
+    enum SampleDeletion: Hashable {
+        case source(String)
+        case imported
+        case all
+    }
+
+    /// Zdroje importu s počty vzorků, seřazené podle názvu.
+    private var importSources: [(source: String, count: Int)] {
+        Dictionary(grouping: samples.filter(\.isImported), by: \.teacherModel)
+            .map { (source: $0.key, count: $0.value.count) }
+            .sorted { $0.source.localizedCompare($1.source) == .orderedAscending }
+    }
+
+    private func targets(_ deletion: SampleDeletion) -> [TrainingSample] {
+        switch deletion {
+        case .source(let source): samples.filter { $0.teacherModel == source }
+        case .imported: samples.filter(\.isImported)
+        case .all: samples
+        }
+    }
+
+    private func title(_ deletion: SampleDeletion) -> String {
+        let count = targets(deletion).count
+        switch deletion {
+        case .source(let source): return "Smazat \(count) vzorků z \(TrainingSample.sourceLabel(source))?"
+        case .imported: return "Smazat všech \(count) importovaných vzorků?"
+        case .all: return "Smazat všech \(count) vzorků, i těch od učitele?"
+        }
+    }
+
+    private func delete(_ deletion: SampleDeletion) {
+        for sample in targets(deletion) { context.delete(sample) }
+        try? context.save()
+    }
+
+    @ViewBuilder
+    private var deleteMenu: some View {
+        Menu {
+            let sources = importSources
+            if !sources.isEmpty {
+                Section("Importované") {
+                    ForEach(sources, id: \.source) { item in
+                        Button(role: .destructive) {
+                            pendingDeletion = .source(item.source)
+                        } label: {
+                            Label("\(TrainingSample.sourceLabel(item.source)) (\(item.count))", systemImage: "square.and.arrow.down")
+                        }
+                    }
+                    if sources.count > 1 {
+                        Button(role: .destructive) {
+                            pendingDeletion = .imported
+                        } label: {
+                            Label("Všechny importované", systemImage: "tray.and.arrow.down")
+                        }
+                    }
+                }
+            }
+            Button(role: .destructive) {
+                pendingDeletion = .all
+            } label: {
+                Label("Všechny vzorky", systemImage: "trash")
+            }
+        } label: {
+            Label("Smazat", systemImage: "trash")
+        }
+        .disabled(samples.isEmpty)
     }
 
     var body: some View {
@@ -390,6 +462,22 @@ struct TrainingSamplesView: View {
         }
         .navigationTitle("Vzorky")
         .navigationBarTitleDisplayMode(.inline)
+        .toolbar {
+            ToolbarItem(placement: .topBarTrailing) { deleteMenu }
+        }
+        .confirmationDialog(
+            pendingDeletion.map(title) ?? "",
+            isPresented: Binding(
+                get: { pendingDeletion != nil },
+                set: { if !$0 { pendingDeletion = nil } }
+            ),
+            titleVisibility: .visible,
+            presenting: pendingDeletion
+        ) { deletion in
+            Button("Smazat", role: .destructive) { delete(deletion) }
+        } message: { _ in
+            Text("Nedá se vrátit. Hotový adaptér to neovlivní, jen příští trénink.")
+        }
         .overlay {
             if samples.isEmpty {
                 ContentUnavailableView("Zatím žádné vzorky", systemImage: "tray")
@@ -445,6 +533,8 @@ struct TeacherCaptureView: View {
                     Picker("Učitel", selection: $teacher) {
                         if settings.isConnected(.claude) { Text("Claude").tag(AIProvider.claude) }
                         if settings.isConnected(.gemini) { Text("Gemini").tag(AIProvider.gemini) }
+                        if settings.isConnected(.openai) { Text("ChatGPT").tag(AIProvider.openai) }
+                        if settings.isConnected(.nvidia) { Text("NVIDIA").tag(AIProvider.nvidia) }
                     }
                 } footer: {
                     Text("Každá vybraná odpověď je jeden požadavek na API.")
@@ -497,13 +587,15 @@ struct TeacherCaptureView: View {
             }
         }
         .onAppear {
-            if !settings.isConnected(.claude) { teacher = .gemini }
+            if !settings.isConnected(teacher), let first = AIProvider.cloud.first(where: settings.isConnected) {
+                teacher = first
+            }
         }
     }
 
     private func run() {
         let chosen = pairs.filter { selection.contains($0.id) }
-        let teacherModel = teacher == .claude ? settings.cloud.claudeModel : settings.cloud.geminiModel
+        let teacherModel = settings.cloudModel(for: teacher)
         isRunning = true
         done = 0
         failed = 0

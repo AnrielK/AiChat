@@ -18,8 +18,11 @@ public extension FinFillPipeline {
     ///
     /// Uses `config.ticker`, `config.fiscalYear`, `config.mapping`, `config.secUserAgent`;
     /// `config.spreadsheet` is ignored.
-    func createWorkbook(template: SpreadsheetTemplate, title: String? = nil,
+    func createWorkbook(template original: SpreadsheetTemplate, title: String? = nil,
                         log: @escaping @Sendable (Event) -> Void = { _ in }) async throws -> NewWorkbookReport {
+        // Výkazy i Segments: nejnovější rok vlevo, starší doprava (výchozí), nebo naopak.
+        let newestFirst = config.newestFirst
+        let template = newestFirst ? original.newestFirst() : original
         let filing = try await fetchFiling(log: log)
         let yc = template.yearColumns
         let firstYear = filing.period.fiscalYear - (yc.count - 1)
@@ -29,7 +32,9 @@ public extension FinFillPipeline {
         // Segments of all years (older 10-Ks downloaded) before the workbook exists.
         var groups: [SegmentGroup] = []
         var yearColumns: [Int: Int] = [:]
-        for i in 0..<yc.count { yearColumns[firstYear + i] = yc.first + i }
+        for i in 0..<yc.count {
+            yearColumns[firstYear + i] = WorkbookFiller.column(offset: i, firstColumn: yc.first, columnCount: yc.count, newestFirst: newestFirst)
+        }
         if config.segments {
             let facts = await segmentHistory(filing: filing, years: firstYear...filing.period.fiscalYear, log: log)
             groups = SegmentExtractor.extract(facts: facts, periods: periods)
@@ -66,7 +71,8 @@ public extension FinFillPipeline {
 
         // 2) All years.
         let plan = WorkbookFiller.plan(mapping: config.mapping, facts: filing.facts, periods: periods,
-                                       firstYear: firstYear, firstColumn: yc.first, columnCount: yc.count)
+                                       firstYear: firstYear, firstColumn: yc.first, columnCount: yc.count,
+                                       newestFirst: newestFirst)
         for y in plan.years {
             let note = y.failed > 0 ? "✗ \(y.failed) kontrol nesedí – rok vynechán"
                 : y.plugged > 0 ? "± \(y.plugged) dorovnání" : "✓"

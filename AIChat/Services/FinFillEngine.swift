@@ -37,7 +37,7 @@ struct FinFillEngine: LLMEngine {
                        cap > 0 ? cap : .max)
         case .apple:
             return 4_096
-        case .claude, .gemini:
+        case .claude, .gemini, .openai, .nvidia:
             return 100_000
         }
     }

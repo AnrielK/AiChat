@@ -1,3 +1,236 @@
+# Segments: jeden řádek na segment
+
+- Firmy identifikátor segmentu mezi lety přejmenují (NVIDIA `ComputeAndNetworkingMember` →
+  `ComputeAndNetworkingSegmentMember`), takže list Segments měl „Compute & Networking“ a „Graphics“
+  dvakrát (novější a starší roky zvlášť) a meziroční změna na rozhraní chyběla. Řádky se teď
+  slučují podle názvu.
+
+---
+
+# Šablona souhrnu 10-K
+
+- Souhrn má pevnou šablonu (`SummaryBrief`): **Teze** (1–2 věty) · **Klíčová čísla** (tabulka
+  z XBRL) · **Co se změnilo** (max 4) · **Tahouni byznysu** (3) · **Hlavní rizika** (3) ·
+  **Kapitál a akcionáři** (3) · **Výhled vedení** (2) · **Pro valuaci (DCF)** (3). Body max ~20 slov,
+  oddíl bez informací = „—“. Model vyplňuje značky (`THESIS:` …); když šablonu nedodrží, jednou
+  se zeptá znovu, jinak se ukáže text, jak je.
+- List **Souhrn**: tabulka jen s podstatnými čísly (tržby, marže, čistý zisk, EPS, FCF, hotovost,
+  dluh, segmenty), změna u částek v %, u marží v p.b., růst zeleně / pokles červeně. Souhrny
+  jednotlivých kapitol 10-K jsou dole jako sbalená skupina řádků „Podklady“.
+
+---
+
+# 10-K → Sheets: nejnovější rok vlevo, list Souhrn na začátku
+
+- **Nový sešit ze šablony:** výkazy (Income statement, Balance sheet, Cash flow) i list Segments
+  mají aktuální rok v prvním sloupci (G) a starší roky doprava. Šablona se při vytvoření zrcadlí
+  (`SpreadsheetTemplate.newestFirst()`): buňky, šířky a vzorce – „tento rok − předchozí“ míří
+  na sloupec vpravo, počáteční hotovost bere konec roku vpravo. DCF/WACC hledají rok přes
+  `INDEX/MATCH`, jejich rozsahy začínají o sloupec dřív (`$F:$Z`), aby nový rok vložený do G
+  byl uvnitř rozsahu. Přepínač **Nový sešit: nejnovější rok vlevo** (výchozí zapnuto).
+- **Existující sešit:** pořadí se pozná z hlavičky. Ve starém pořadí se nový rok přidá vpravo
+  jako dřív; v novém se vloží do G (kopie z dosavadního nejnovějšího roku) a `{prev}` míří vpravo.
+- **Souhrn:** místo listu `Summary FY<rok>` jeden list **Souhrn**, vždy první v sešitu; nový
+  souhrn ho vyčistí a přepíše. Text se zalamuje, nadpisy tučně, klíčová čísla z XBRL jako
+  tabulka se skutečnými čísly (USD mld., %, změna).
+
+---
+
+# Tabulky: jednotka z buněk jednou nad tabulkou
+
+- Model, který jednotku zopakuje v každé buňce („63,338 mld. USD“), ji teď nemá v tabulce
+  stokrát: pokud ji mají všechny číselné buňky sloupce, přesune se do hlavičky a společná se
+  ukáže jednou („Hodnoty v mld. USD“). Kopírování a CSV berou původní buňky.
+
+---
+
+# NVIDIA API (build.nvidia.com)
+
+- Nová cloudová služba **NVIDIA**: hostované modely (DeepSeek, Qwen, Llama, Nemotron, Kimi…)
+  přes OpenAI-kompatibilní Chat Completions. Free tier ~40 dotazů/min – při 429 se čeká 15/30/60 s.
+- Přemýšlení z `reasoning_content` i z `<think>`; přepínač přes `chat_template_kwargs`.
+- Okno modelu katalog neposílá: výchozí 128k, skutečné se zjistí z chyby „maximum context length“.
+
+---
+
+# Gemini: opakování při přetížení (503)
+
+- Chyba 503 „high demand“ (i uprostřed streamu) se zkusí znovu po 3/8/20 s, dokud nepřišel
+  text odpovědi. Po vyčerpání pokusů srozumitelná hláška.
+
+---
+
+# Filtr importu bez endpointu /filter
+
+- Filtr podle sloupce dával „Chyba 500“ a import s ním vypršel: endpoint `/filter` prohlížeče
+  datasetů u větších datasetů padá. Filtr se teď vyhodnocuje v aplikaci – nejdřív se najde úsek,
+  kde řádky s hodnotou leží (u `origin` → `questions_ujc_cas` řádky kolem 90 tisíc), a import čte
+  jen z něj. Pod filtrem se ukáže nalezený rozsah.
+- Požadavky na Hugging Face mají časový limit 30 s a při 429/5xx se dvakrát zopakují.
+
+---
+
+# Hromadné mazání trénovacích vzorků
+
+- **Trénink › Procházet vzorky › koš vpravo nahoře:** smaže vzorky z jednoho importu (dataset z Hugging
+  Face nebo soubor, s počtem), všechny importované najednou, nebo úplně všechny. Vzorky od učitele
+  se při mazání importovaných nechávají. Vždy s potvrzením; hotový adaptér to neovlivní.
+- Oprava překladu: `HuggingFaceDataset.page` četl a zapisoval `components` v jednom výrazu
+  (overlapping access).
+
+---
+
+# Import datasetu: výběr řádků a filtr
+
+- **Načíst dataset › Výběr řádků:** pořadí „Po sobě“ s volbou **Začít od řádku**, nebo **Náhodně** –
+  bloky po 20 řádcích z náhodných míst celého splitu, uvnitř bloku zamíchané.
+- **Filtr sloupec = hodnota** (např. `origin` → `questions_ujc_cas`): sloupce a četnosti hodnot
+  z endpointu `/statistics`, filtruje se na serveru přes `/filter`. Náhled i počet řádků se po změně
+  načtou znovu, ruční mapování sloupců zůstane. Bez statistik se filtr nenabídne.
+- Důvod: kolekce seřazené podle zdroje (`ctu-aic/cs_instruction_tuning_collection`) šly dřív načíst
+  jen od začátku, takže se k nativním českým zdrojům nedalo dostat.
+
+---
+
+# Zbývající limity cloudových služeb
+
+- **Nastavení › Cloud › (služba) › „Zbývá“:** kolik dotazů a tokenů zbývá podle hlaviček poslední odpovědi
+  (OpenAI `x-ratelimit-remaining-*`, Claude `anthropic-ratelimit-*-remaining`), s ukazatelem a živým
+  odpočtem do obnovy. Když se limit dotazů obnovuje po hodinách (free tier OpenAI: 50 dotazů za den),
+  popisek říká „denní limit“. K tomu počítadla odeslaných dotazů za minutu a za 24 h (z tohoto zařízení) –
+  jediný údaj, který jde ukázat u Gemini (limity v hlavičkách neposílá).
+- **Menu titulku chatu** ukáže u cloudové služby krátký řádek „Zbývá 47/50 dotazů dnes · obnova za …“.
+
+---
+
+# ChatGPT (OpenAI API) jako třetí cloudový poskytovatel
+
+- **Nový poskytovatel „ChatGPT“** vedle Clauda a Gemini: Nastavení › Cloud › ChatGPT – API klíč
+  (platform.openai.com/api-keys, ukládá se do Klíčenky), ID modelu, načtení modelů z účtu, test spojení.
+  Výchozí model `gpt-6-sol` (levnější `gpt-6-luna`, nejsilnější `gpt-6-astra`).
+- **Responses API** (`/v1/responses`) se streamováním – jen tam OpenAI vrací shrnutí přemýšlení.
+  Systémový prompt jde jako `instructions`, `store: false` (konverzace se na serveru neukládá).
+  Obrázky jako `input_image`, PDF jako `input_file` (data URL), textové přílohy vložené do textu.
+- **Přemýšlení:** zapnuto = výchozí úsilí modelu + shrnutí (`reasoning.summary: auto`); vypnuto = `effort: none`
+  (GPT-6 Sol/Luna, GPT-5.1+), `minimal` (GPT-5), `low` (Astra, o3/o4). GPT-4.x přemýšlení nemá a přijímá
+  vlastní teplotu. Když organizace není ověřená a shrnutí nejde, požadavek se zopakuje bez nich.
+- **Limity:** okno a max. odpověď z tabulky podle ID (Models API OpenAI je nevrací; GPT-6 1,05M / 128k).
+  Limit tokenů za minutu se čte z hlaviček `x-ratelimit-limit-tokens`; OpenAI do něj počítá i
+  max_output_tokens, takže rozpočet promptu = limit − max. odpověď. Při 429 kvůli velikosti jeden pokus
+  s menším promptem. Vlastní limit jde zadat ručně.
+- ChatGPT jde vybrat i jako učitel v Tréninku (LoRA) a používá ho FinFill.
+
+---
+
+# MLX-MoE: test komprese expertů; počítání během čtení výchozí vypnuto
+
+- **Výsledek fáze 3b** („Počítat během čtení“): 4,71 / 4,96 / 4,62 tok/s proti 5,13–5,18 bez ní – žádný
+  měřitelný přínos (spíš rozptyl), výchozí proto vypnuto. Cache 3,5 GB s prefillem po 512 tokenech se
+  vešla a dala 5,32 tok/s (412 tokenů), zatím nejlepší běh.
+- **Test komprese expertů** (tlačítko vedle testu čtení): 64 náhodných expertů bez page cache, komprese
+  LZ4 / LZFSE / ZLIB z frameworku Compression. Ukáže poměr velikosti (zvlášť 4bitové váhy a BF16 škály
+  s posuny), rychlost rozbalení na jednom a na všech jádrech a efektivní rychlost čtení při 1,45 GB/s z flash
+  (flash / poměr, pokud rozbalení stíhá). Komprese dává smysl jen od ~20 % úspory.
+- **Výsledek:** LZ4 99,8 % (nic), LZFSE 91,2 % (váhy 94,3 %, škály a posuny 66 %), rozbalení 3,1–3,3 GB/s
+  na všech jádrech → efektivně 1,59 GB/s místo 1,45 (+10 %); ZLIB 90,7 %, ale rozbalení jen ~1 GB/s.
+  4bitové váhy jsou skoro náhodná data. +10 % nestojí za přebalení 16 GB a zatížení CPU – **nedělá se**.
+- **Nejlepší nastavení MLX** (26. 9. večer): cache 3,5 GB (29 slotů), KV q8, prefill 512, předčítání zap:
+  436 tokenů 5,78 a 5,70 tok/s (dva stejné běhy), zásah slotů 94,1 %, 44 MB/token ve výpočtu. Delší odpověď
+  (752 tokenů) 4,59 tok/s – čekání na předčítání vyrostlo na 25 s (pravděpodobně zahřátí telefonu).
+  Kontext při tomhle nastavení jen ~2–3 tisíce tokenů.
+- **Počet expertů** (cache 3,5 GB, KV q8, prefill 512): 6 expertů 5,70–5,78 tok/s · 5 expertů 6,47–6,64 tok/s
+  (34 MB/token ve výpočtu) · 4 experti 7,65 tok/s (29 MB/token). Méně expertů = méně čtení i výpočtu;
+  kvalitu je potřeba posoudit v odpovědích (8→6 skoro beze změny, 4 bývá znát).
+- **Uzavření MLX-MoE enginu:** funkční experimentální volba, nejlépe 5,32 tok/s (cache 3,5 GB, prefill 512),
+  běžně 5,1–5,2 (cache 3 GB) – na úrovni GGUF (4,6–5,5). Oba narážejí na náhodné čtení z flash ~1,45 GB/s.
+
+---
+
+# MLX-MoE engine, fáze 3b: počítat během čtení chybějících expertů
+
+- Když ve vrstvě někteří experti chybějí, `lookup` jim jen přidělí sloty a GPU hned (asyncEval) počítá
+  váženou část přes přítomné experty; mezitím se chybějící čtou (`load`). Pak se dopočítá část přes
+  chybějící a obě se sečtou (MoE je vážený součet). V první části se chybějící mapují na slot přítomného
+  experta s nulovou vahou – do rozepsaného slotu GPU nesahá (rozepsaná data mohou dát NaN × 0 = NaN).
+- Volba „Počítat během čtení“ (výchozí zapnuto). Očekávání je skromné: výpočet expertů jedné vrstvy je
+  zlomek milisekundy, čtení chybějícího experta ~2–3 ms, schová se tedy jen malá část čekání (odhad +3–5 %).
+
+---
+
+# MLX-MoE: test čtení expertů (rozhoduje o přebalení souboru)
+
+- **Výsledek fáze 3a** (3 GB, předčítání, page cache zap/vyp): 5,13 a 5,15 tok/s – beze změny proti fázi 2.
+  Čtení ve výpočtu 27–28 s, předčítání 59 s na pozadí, čekání na něj 12 s (558 tokenů). Flash dává pořád
+  jen ~1 GB/s, page cache ani víc souběžných čtení nepomohly. Na token se čte ~156 MB (46 ve výpočtu +
+  ~110 předčítání) → při ~1 GB/s ~150 ms, víc než výpočet (~125 ms). Brzdou je propustnost čtení.
+- Podezření: expert v MLX souboru leží v 9 kouscích (3 × 786 kB vah + 6 × 49 kB škál a posunů) na různých
+  místech a nezarovnaně – malá nezarovnaná čtení bez page cache flash nevytíží.
+- **Test čtení expertů** (Parametry › Délka u MLX MoE s experty z úložiště): změří GB/s pro čtení jako teď
+  (9 kousků) vs. jeden souvislý blok stejné velikosti zarovnaný na stránku (a totéž ve 4 souběžných kouscích).
+  Když souvislé čtení vyjde výrazně rychleji, další krok je jednorázově přebalit experty do souboru, kde
+  každý expert leží v celku (jako Flash-iOS), a očekávání je ~7 tok/s.
+- **Výsledek testu** (7 běhů): jako teď 1,25–1,32 GB/s, souvislý blok 1,43–1,45 GB/s, souvislý ve 4 kouscích
+  1,43–1,48 GB/s. Přebalení by dalo ~10 % – nevyplatí se (16 GB navíc). Náhodné čtení bez page cache je na
+  tomhle iPhonu ~1,45 GB/s bez ohledu na tvar čtení (sedí i s celovrstvovým prefillem v GGUF: 1,5 GB/s).
+
+---
+
+# MLX-MoE engine, fáze 3a: rychlejší čtení expertů a page cache jako druhá úroveň
+
+- **Výsledek fáze 2** (cache 3 GB, předčítání zapnuté): 5,18 tok/s (558 tokenů) a 5,06 tok/s (734 tokenů),
+  fáze 1 4,6 tok/s. Zásah slotů 94 %, ve výpočtu jen 44–46 MB/token, předčtení experti použití z 81 %.
+  Pořád ale blokuje čtení: u 734 tokenů 37,8 s čtení ve výpočtu + 12,4 s čekání na předčítání ze 145 s.
+  Čtení jde jen ~1,1 GB/s (krátká čtení bez page cache, souběžně jen tolik, kolik je jader). Výpočet sám
+  ~129 ms/token → strop ~7,7 tok/s. Cache 2,5 GB: 4,3–4,6 tok/s (bez předčítání 3,95). KV q8 rychlost nemění.
+- **Souběžnější čtení:** každé čtení (expert × tenzor) je samostatná úloha na globální frontě místo
+  `concurrentPerform` omezeného počtem jader – víc souběžných požadavků na flash.
+- **Page cache jako druhá úroveň** (nová volba, výchozí zapnuto): soubory vah bez `F_NOCACHE`. Expert
+  vyhozený ze slotu často leží ve volné RAM systému (čisté stránky se do limitu appky nepočítají),
+  takže se místo čtení z flash jen zkopíruje. Stejný princip, na kterém stojí GGUF.
+
+---
+
+# MLX-MoE engine, fáze 2: předčítání podle routeru další vrstvy
+
+- **Výsledek fáze 1** (Qwen3-30B-A3B-Instruct-2507 MLX 4bit DWQ, 6 expertů, cache 3 GB = 25 slotů/vrstvu):
+  odpovědi v pořádku, 558 tokenů za ~121 s = **4,6 tok/s** (GGUF 4,6–5,5). Zásah slotů 84,5 %, 115 MB/token
+  čteno ve výpočtu za 51 s z 121 s (1,26 GB/s – krátká čtení bez page cache). Bez čtení by výpočet dal
+  ~125 ms/token → ~8 tok/s. Kontext jen ~2 300 tokenů – strop paměti 5 GB nestačí na 3 GB cache.
+- **Předčítání:** MoE blok vrstvy L spočítá v tomtéž vyhodnocení i odhad expertů vrstvy L+1 (router L+1
+  nad normovaným reziduálním proudem vrstvy L, jako `RouterPredictor` u GGUF) a jejich čtení spustí na
+  pozadí do slotů L+1, zatímco GPU počítá experty vrstvy L. `ensure` vrstvy L+1 na rozběhnuté čtení počká
+  (DispatchGroup po vrstvách). Předčítání nevyhazuje experty použité v posledním tokenu vrstvy.
+  Obsazení slotů je teď pod zámkem.
+- Log: po odpovědi „prefill … · generování … tok/s“, u MoE z úložiště i předčtení experti, kolik z nich
+  se použilo a kolik výpočet čekal. Volba „Předčítat podle odhadu“ (výchozí zapnuto), cache i 2 560 MB.
+
+---
+
+# MLX-MoE engine, fáze 1: experti z úložiště do slotů v paměti GPU
+
+- Nastavení MLX (u MoE modelu): „Experty z úložiště (experiment)“ + „Cache expertů“ (2–4 GB, výchozí 3 GB).
+- `MLXExpertStore`: z hlaviček safetensors najde tenzory `switch_mlp` (gate/up/down × weight/scales/biases),
+  pro každou MoE vrstvu alokuje pole slotů `[sloty, …]` (sloty = cache / (vrstvy × velikost experta)).
+  Chybějící expert se čte `pread` s `F_NOCACHE` přímo do paměti slotu (sdílená paměť CPU/GPU), paralelně
+  po tenzorech. Vyhazuje se LRU. Statistiky (zásah slotů, MB/token, doba čtení) do Logu enginu po odpovědi.
+- `StreamedQwen3MoEModel`: kopie Qwen3-MoE z mlx-swift-lm, MoE blok vlastní – počká na výběr routeru
+  (`eval`), doplní experty do slotů, `gatherQuantizedMM` nad sloty. Při prefillu, kdy dávka vybere víc
+  expertů než slotů, se počítá po skupinách. Experti se z vah vynechají v `sanitize` (líné načítání
+  safetensors je pak vůbec nepřečte). Registruje se místo `qwen3_moe` v `LLMTypeRegistry`; bez zapnutého
+  streamování vrací původní `Qwen3MoEModel`.
+- Strop paměti počítá u streamovaného modelu hustou část + cache expertů, ne celý adresář.
+- Podmínka pro fázi 2: odpovědi dávají smysl a ≥ 4 tok/s.
+
+---
+
+# Srovnání: Flash-iOS na stejném iPhonu
+
+- Flash-iOS (vlastní Metal engine, Qwen3.5-35B-A3B ve formátu Flash-MoE): ~3,9 tok/s, odpovědi slabé,
+  model se zacyklí a píše nesmysly. AiChat (llama.cpp, experti z flash, odhad z routeru k): 4,6–5,2 tok/s.
+  Vlastní engine nad Metalem se tedy nedělá – současný přístup vychází nejlépe.
+
+---
+
 # MLX: architektura spark2_5 (Spark-X2.5-4B)
 
 - mlx-swift-lm 3.31.4 `spark2_5` nezná („Unsupported model type“). `MLXSpark25.swift` je port Python
@@ -23,6 +256,11 @@
   v GGUF (teplá page cache, čerstvý záznam, zásah cache 95 %): čtení 174 ms (4,40 GB/s – většinou jen kopie
   z page cache), čekání 158 ms, strop 3,5 / 5,5 tok/s; GGUF ve stejné chvíli 4,40 tok/s se zapnutým záznamem.
   I s nulovým čtením zůstává čekání + kopie ~180 ms → nejvýš ~5,5–6 tok/s. **Přepis se nedělá.**
+- **Rozbor čekání** (26. 9.): holé eval 0,72 ms, s top-k a čtením indexů 0,83 ms, skutečná vrstva po vrstvě
+  +2,3 ms proti běhu bez čekání. Se zkompilovanou vrstvou (`compile`) 147 ms/token místo 155 – příprava
+  grafu na CPU to tedy není. Zbytek je chování GPU při krátkých úsecích práce s čekáním mezi nimi
+  (takt, plánování), to aplikace neovlivní. Podlaha ~150 ms/token → i bez čtení nejvýš ~6,5 tok/s,
+  reálně 5,5–6. GGUF ve stejný den 5,48 tok/s. **MLX-MoE engine se nedělá.**
   Brzdí čekání na GPU v každé vrstvě (118 ms z tokenu) a to, že MLX musí vybrané experty pokaždé
   zkopírovat, i když leží v page cache – llama.cpp je díky mmapu používá přímo.
 

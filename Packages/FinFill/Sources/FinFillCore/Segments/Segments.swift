@@ -45,9 +45,14 @@ public enum SegmentExtractor {
                 guard dims.count == 1, let member = dims[axis],
                       let days = f.durationDays, (350...380).contains(days),
                       let period = periods.first(where: { $0.endDate == f.end }) else { continue }
-                var line = lines[member] ?? .init(member: member, name: label(member), values: [:], parent: nil)
+                // Klíč podle názvu, ne podle identifikátoru: firmy člena mezi lety přejmenují
+                // (NVIDIA „ComputeAndNetworkingMember“ → „ComputeAndNetworkingSegmentMember“)
+                // a jeden segment by se rozpadl na dva řádky. Identifikátor zůstane z nejnovějšího 10-K.
+                let name = label(member)
+                let key = mergeKey(name)
+                var line = lines[key] ?? .init(member: member, name: name, values: [:], parent: nil)
                 if line.values[period.fiscalYear] == nil { line.values[period.fiscalYear] = f.value }
-                lines[member] = line
+                lines[key] = line
             }
             guard lines.count >= 2 else { return nil }
             let latest = { (l: SegmentGroup.Line) -> Double in l.values.max { $0.key < $1.key }?.value ?? 0 }
@@ -61,6 +66,13 @@ public enum SegmentExtractor {
             }
             return SegmentGroup(axis: axis, title: title, lines: ordered)
         }
+    }
+
+    /// „Compute & Networking“, „Compute and networking“ → „computenetworking“.
+    static func mergeKey(_ name: String) -> String {
+        name.lowercased()
+            .replacingOccurrences(of: " and ", with: " ")
+            .filter { $0.isLetter || $0.isNumber }
     }
 
     /// A line equal to the sum of 2–3 other lines (in every year both have) is their parent.

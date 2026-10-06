@@ -63,6 +63,66 @@ enum HuggingFaceDataset {
         }
     }
 
+    /// Podmínka „sloupec = hodnota“. Vyhodnocuje se v aplikaci, ne na serveru:
+    /// endpoint `/filter` prohlížeče datasetů u větších datasetů vrací 500 nebo
+    /// nestihne odpovědět. Hodí se u kolekcí poskládaných z více zdrojů
+    /// (sloupec typu `origin`), které jsou seřazené podle zdroje.
+    struct Filter: Sendable, Hashable {
+        let column: String
+        let value: String
+        let isBool: Bool
+
+        func matches(_ row: [String: Cell]) -> Bool {
+            guard let text = row[column]?.text else { return false }
+            if isBool {
+                // Statistiky hlásí „True“/„False“, řádky vrací JSON bool (NSNumber → „1“/„0“).
+                let truthy = ["1", "true"].contains(text.lowercased())
+                return truthy == (value.lowercased() == "true")
+            }
+            return text == value
+        }
+    }
+
+    /// Sloupec s malým počtem různých hodnot a jejich četnosti – z endpointu
+    /// `/statistics`. Z nich se nabízí filtr, aby se hodnota nemusela psát ručně.
+    struct LabelColumn: Sendable, Hashable, Identifiable {
+        let name: String
+        let isBool: Bool
+        /// Hodnoty seřazené od nejčastější.
+        let values: [(value: String, count: Int)]
+        var id: String { name }
+
+        static func == (lhs: Self, rhs: Self) -> Bool { lhs.name == rhs.name }
+        func hash(into hasher: inout Hasher) { hasher.combine(name) }
+    }
+
+    /// Sloupce, podle kterých jde filtrovat. Statistiky nemají všechny datasety
+    /// (počítají se jen pro menší splity), takže prázdný výsledek není chyba.
+    static func labelColumns(dataset: String, split: Split) async throws -> [LabelColumn] {
+        var components = URLComponents(string: "https://datasets-server.huggingface.co/statistics")
+        components?.queryItems = [
+            URLQueryItem(name: "dataset", value: dataset),
+            URLQueryItem(name: "config", value: split.config),
+            URLQueryItem(name: "split", value: split.split),
+        ]
+        guard let url = components?.url else { return [] }
+        let object = try await json(url)
+        let items = (object["statistics"] as? [[String: Any]]) ?? []
+        return items.compactMap { item -> LabelColumn? in
+            guard let name = item["column_name"] as? String,
+                  let type = item["column_type"] as? String,
+                  ["string_label", "class_label", "bool"].contains(type),
+                  let stats = item["column_statistics"] as? [String: Any],
+                  let frequencies = stats["frequencies"] as? [String: Any],
+                  frequencies.count > 1
+            else { return nil }
+            let values = frequencies
+                .map { (value: $0.key, count: ($0.value as? NSNumber)?.intValue ?? 0) }
+                .sorted { $0.count > $1.count }
+            return LabelColumn(name: name, isBool: type == "bool", values: values)
+        }
+    }
+
     static func page(
         dataset: String,
         split: Split,
@@ -91,10 +151,87 @@ enum HuggingFaceDataset {
         return Page(columns: columns, rows: rows, total: total)
     }
 
+    // MARK: - Hledání rozsahu pro filtr
+
+    /// Kde v splitu leží řádky s danou hodnotou, pokud jsou pohromadě (kolekce
+    /// seřazené podle zdroje). Čte se po jednom řádku: nejdřív sonda každých
+    /// `expected / 2` řádků – souvislý blok té délky tak zasáhne nejméně jednou –
+    /// a od zásahu se binárně hledají oba okraje. Pro 100 tisíc řádků a hodnotu
+    /// s 11 tisíci výskyty je to kolem 45 malých požadavků.
+    ///
+    /// nil = hodnota se nenašla, je moc vzácná na sondování, nebo řádky
+    /// nejsou pohromadě (nalezený úsek je kratší než počet ze statistik).
+    static func locate(
+        dataset: String,
+        split: Split,
+        filter: Filter,
+        expected: Int,
+        total: Int
+    ) async throws -> Range<Int>? {
+        guard expected > 0, total > 0 else { return nil }
+        if expected >= total { return 0 ..< total }
+        let step = max(1, expected / 2)
+        let probes = Array(Swift.stride(from: step - 1, to: total, by: step))
+        guard probes.count <= 160 else { return nil }
+
+        let hit: @Sendable (Int) async throws -> Bool = { offset in
+            guard offset >= 0, offset < total else { return false }
+            let page = try await HuggingFaceDataset.page(dataset: dataset, split: split, offset: offset, length: 1)
+            return page.rows.first.map { filter.matches($0) } ?? false
+        }
+
+        // Sondy po osmi souběžně – sériově by to trvalo zbytečně dlouho.
+        var found: Int?
+        var index = 0
+        while found == nil, index < probes.count {
+            let batch = Array(probes[index ..< min(index + 8, probes.count)])
+            index += batch.count
+            let hits = try await withThrowingTaskGroup(of: (Int, Bool).self) { group in
+                for offset in batch { group.addTask { (offset, try await hit(offset)) } }
+                var result: [Int] = []
+                for try await (offset, isHit) in group where isHit { result.append(offset) }
+                return result
+            }
+            found = hits.min()
+        }
+        guard let first = found else { return nil }
+
+        // Levý okraj: předchozí sonda (nebo -1) je mimo, `first` uvnitř.
+        var outside = first - step
+        var inside = first
+        while inside - outside > 1 {
+            let middle = (outside + inside) / 2
+            if try await hit(middle) { inside = middle } else { outside = middle }
+        }
+        let lower = inside
+
+        // Pravý okraj: za `lower + expected` už blok skončit musí.
+        inside = first
+        outside = min(total, lower + expected)
+        while outside - inside > 1 {
+            let middle = (inside + outside) / 2
+            if try await hit(middle) { inside = middle } else { outside = middle }
+        }
+        let range = lower ..< inside + 1
+        return range.count == expected ? range : nil
+    }
+
     /// Token z Klíčenky se přidá stejně jako u stahování modelů – gated datasety
     /// bez něj vrátí 401.
+    /// Přetížený prohlížeč datasetů občas vrátí 429 nebo 5xx a napodruhé projde,
+    /// proto dva opakované pokusy s krátkou pauzou.
     private static func json(_ url: URL) async throws -> [String: Any] {
-        let (data, response) = try await URLSession.shared.data(for: HuggingFaceRepo.request(url))
+        var request = HuggingFaceRepo.request(url)
+        request.timeoutInterval = 30
+        var attempt = 0
+        var (data, response) = try await URLSession.shared.data(for: request)
+        while let http = response as? HTTPURLResponse,
+              http.statusCode == 429 || (500 ..< 600).contains(http.statusCode),
+              http.statusCode != 501, attempt < 2 {
+            attempt += 1
+            try await Task.sleep(for: .seconds(attempt * 2))
+            (data, response) = try await URLSession.shared.data(for: request)
+        }
         if let http = response as? HTTPURLResponse, !(200 ..< 300).contains(http.statusCode) {
             throw ProviderError.http(status: http.statusCode, message: message(forStatus: http.statusCode))
         }
@@ -110,6 +247,8 @@ enum HuggingFaceDataset {
             "Dataset vyžaduje přihlášení. Vlož token Hugging Face ve Stahování a na webu přijmi jeho podmínky."
         case 404:
             "Dataset neexistuje, nebo pro něj není zapnutý prohlížeč datasetů."
+        case 429:
+            "Hugging Face omezuje počet požadavků. Zkus to za chvíli, nebo s menším počtem vzorků."
         case 501:
             "Tenhle dataset prohlížeč datasetů nepodporuje – řádky se přes API načíst nedají."
         default:

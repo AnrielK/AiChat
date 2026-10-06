@@ -202,3 +202,101 @@ public extension A1 {
         return (row - 1, index(String(letters)))
     }
 }
+
+// MARK: - Nejnovější rok vlevo
+
+public extension SpreadsheetTemplate {
+    /// Stejný sešit s obráceným pořadím let ve výkazech: nejnovější rok v prvním sloupci bloku
+    /// (G), starší doprava. Buňky, šířky a sloučení v blocích let se zrcadlí a odkazy ve vzorcích
+    /// se přepíšou, takže „tento rok − předchozí“ (`=H37-G37`) míří dál na předchozí rok (`=N37-O37`).
+    ///
+    /// Rozsahy přes celý blok (`IncomeStatement!$G$5:$Z$5` v DCF – hledání podle roku) zůstanou,
+    /// jen začnou o sloupec dřív (`$F$5:$Z$5`, sloupec F je ve výkazech prázdný). Nový rok se
+    /// v takovém sešitu vkládá do G a Sheets rozsah rozšíří jen o sloupec *uvnitř* rozsahu –
+    /// vložení na jeho začátek by rozsah jen posunulo a DCF by nový rok neviděl.
+    func newestFirst() -> SpreadsheetTemplate {
+        var t = self
+        let first = yearColumns.first, last = yearColumns.first + yearColumns.count - 1
+        let yearSheets = Set(yearColumns.sheets)
+        func mirror(_ c: Int) -> Int { (first...last).contains(c) ? first + last - c : c }
+
+        for i in t.sheets.indices {
+            let own = t.sheets[i].title
+            let isYearSheet = yearSheets.contains(own)
+            t.sheets[i].cells = t.sheets[i].cells.map { cell in
+                var cell = cell
+                if isYearSheet, let (row, col) = A1.parse(cell.a) { cell.a = A1.column(mirror(col)) + String(row + 1) }
+                if let f = cell.f {
+                    cell.f = Self.mirrorFormula(f, ownSheet: own, yearSheets: yearSheets, first: first, last: last)
+                }
+                return cell
+            }
+            guard isYearSheet else { continue }
+            var widths: [String: Int] = [:]
+            for (column, px) in t.sheets[i].columnWidths { widths[A1.column(mirror(A1.index(column)))] = px }
+            t.sheets[i].columnWidths = widths
+            t.sheets[i].merges = t.sheets[i].merges.map { merge in
+                let parts = merge.split(separator: ":").map(String.init)
+                guard parts.count == 2, let (r1, c1) = A1.parse(parts[0]), let (r2, c2) = A1.parse(parts[1]) else { return merge }
+                let (m1, m2) = (mirror(c1), mirror(c2))
+                return "\(A1.column(min(m1, m2)))\(r1 + 1):\(A1.column(max(m1, m2)))\(r2 + 1)"
+            }
+        }
+        return t
+    }
+
+    /// Odkaz na buňku nebo rozsah, volitelně s listem (`DCF!M55`, `'Cash Flow'!$G$2:$Z$2`).
+    /// Názvy funkcí (`LOG10(`) a text v uvozovkách se nepřepisují.
+    internal static let referencePattern = try! NSRegularExpression(pattern:
+        #"(?<![A-Za-z0-9_.$'!])((?:'(?:[^']|'')+'|[A-Za-z_][A-Za-z0-9_]*)!)?(\$?)([A-Z]{1,3})(\$?)([0-9]+)(?::(\$?)([A-Z]{1,3})(\$?)([0-9]+))?(?![A-Za-z0-9_(])"#)
+
+    internal static func mirrorFormula(_ formula: String, ownSheet: String, yearSheets: Set<String>,
+                                       first: Int, last: Int) -> String {
+        formula.components(separatedBy: "\"").enumerated().map { i, part in
+            i % 2 == 0 ? mirrorReferences(part, ownSheet: ownSheet, yearSheets: yearSheets, first: first, last: last) : part
+        }
+        .joined(separator: "\"")
+    }
+
+    private static func mirrorReferences(_ text: String, ownSheet: String, yearSheets: Set<String>,
+                                         first: Int, last: Int) -> String {
+        let ns = text as NSString
+        var out = text
+        for match in referencePattern.matches(in: text, range: NSRange(location: 0, length: ns.length)).reversed() {
+            func group(_ i: Int) -> String? {
+                let r = match.range(at: i)
+                return r.location == NSNotFound ? nil : ns.substring(with: r)
+            }
+            let prefix = group(1) ?? ""
+            var sheet = ownSheet
+            if !prefix.isEmpty {
+                sheet = String(prefix.dropLast())
+                if sheet.hasPrefix("'") { sheet = String(sheet.dropFirst().dropLast()).replacingOccurrences(of: "''", with: "'") }
+            }
+            guard yearSheets.contains(sheet), let col1 = group(3), let row1 = group(5) else { continue }
+            let c1 = A1.index(col1)
+            let replacement: String
+            if let col2 = group(7), let row2 = group(9) {
+                let c2 = A1.index(col2)
+                let (lo, hi) = (min(c1, c2), max(c1, c2))
+                var start = c1, end = c2
+                if first <= lo, hi <= last {
+                    // Rozsah uvnitř bloku let: zrcadlit oba konce, levý konec zůstane vlevo.
+                    let (m1, m2) = (first + last - c1, first + last - c2)
+                    (start, end) = (min(m1, m2), max(m1, m2))
+                } else if lo <= first, hi >= last, c1 == first, first > 0 {
+                    start = first - 1
+                } else {
+                    continue
+                }
+                replacement = "\(prefix)\(group(2) ?? "")\(A1.column(start))\(group(4) ?? "")\(row1):"
+                    + "\(group(6) ?? "")\(A1.column(end))\(group(8) ?? "")\(row2)"
+            } else {
+                guard first <= c1, c1 <= last else { continue }
+                replacement = "\(prefix)\(group(2) ?? "")\(A1.column(first + last - c1))\(group(4) ?? "")\(row1)"
+            }
+            out = (out as NSString).replacingCharacters(in: match.range, with: replacement)
+        }
+        return out
+    }
+}

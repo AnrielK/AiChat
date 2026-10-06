@@ -57,6 +57,23 @@ nepozná.
 
 Zadání, která už v datasetu jsou, se přeskočí, takže opakovaný import nevytvoří duplicity.
 
+### Výběr řádků z Hugging Face
+
+Kolekce poskládané z více zdrojů bývají seřazené podle zdroje – třeba
+`ctu-aic/cs_instruction_tuning_collection` má na začátku 50 tisíc řádků přeložené Alpacy
+a nativní otázky z jazykové poradny ÚJČ až kolem řádku 90 000. Proto sekce **Výběr řádků**:
+
+- **Po sobě / Začít od řádku** – čte se od zadaného řádku dál.
+- **Náhodně** – bloky po 20 řádcích z náhodných míst celého splitu (nebo výběru s filtrem),
+  uvnitř bloku se řádky zamíchají. Jeden požadavek na blok, takže import trvá déle.
+- **Filtr** – sloupce s malým počtem hodnot podle endpointu `/statistics` (typicky `origin`),
+  hodnoty se nabízí i s počty řádků. Filtr se vyhodnocuje v aplikaci: endpoint `/filter`
+  u tohohle datasetu vracel 500 nebo nestihl odpovědět. Místo toho se čtením po jednom řádku
+  najde úsek, kde hodnota leží (sonda každých `počet / 2` řádků, pak binárně oba okraje, zhruba
+  45 požadavků), a import čte jen z něj. Když řádky pohromadě nejsou, filtruje se až při čtení
+  a import se zastaví po 300 požadavcích.
+  Statistiky nemají všechny datasety; když chybí, filtr se prostě nenabídne.
+
 ## Rozhodnutí, která stojí za vysvětlení
 
 **Trenér si model načítá vlastní, ne ten z `MLXEngine`.** Trénink model mění na místě

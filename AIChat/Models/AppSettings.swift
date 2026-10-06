@@ -6,8 +6,15 @@ enum AIProvider: String, CaseIterable, Identifiable, Codable, Sendable {
     case apple
     case claude
     case gemini
+    case openai
+    case nvidia
 
     var id: String { rawValue }
+
+    /// Cloudoví poskytovatelé v pořadí, v jakém se nabízejí v Nastavení.
+    static let cloud: [AIProvider] = [.claude, .gemini, .openai, .nvidia]
+
+    var isCloud: Bool { Self.cloud.contains(self) }
 
     var title: String {
         switch self {
@@ -15,6 +22,8 @@ enum AIProvider: String, CaseIterable, Identifiable, Codable, Sendable {
         case .apple: "Apple Intelligence"
         case .claude: "Claude"
         case .gemini: "Gemini"
+        case .openai: "ChatGPT"
+        case .nvidia: "NVIDIA"
         }
     }
 
@@ -24,6 +33,8 @@ enum AIProvider: String, CaseIterable, Identifiable, Codable, Sendable {
         case .apple: "apple.intelligence"
         case .claude: "asterisk"
         case .gemini: "sparkles"
+        case .openai: "bubble.left.and.bubble.right"
+        case .nvidia: "cpu.fill"
         }
     }
 
@@ -31,6 +42,8 @@ enum AIProvider: String, CaseIterable, Identifiable, Codable, Sendable {
         switch self {
         case .claude: .claude
         case .gemini: .gemini
+        case .openai: .openai
+        case .nvidia: .nvidia
         default: nil
         }
     }
@@ -123,6 +136,18 @@ struct LocalModelSettings: Codable, Equatable, Sendable {
     var kvCacheK: KVCachePrecision = .f16
     /// Přesnost hodnot v KV cache. Platí jen pro MLX, stejně jako `kvCacheK`.
     var kvCacheV: KVCachePrecision = .f16
+    /// MLX MoE: routovaní experti z úložiště do cache slotů v paměti GPU (experiment,
+    /// `MLXExpertStore`). Zatím jen Qwen3-MoE ve formátu mlx-community (switch_mlp, affine).
+    var mlxStreamExperts = false
+    /// Velikost cache expertů v MB (sloty rozdělené rovnoměrně mezi MoE vrstvy).
+    var mlxExpertCacheMB = 3072
+    /// MLX MoE z úložiště: předčítat experty další vrstvy podle odhadu z jejího routeru.
+    var mlxExpertPrefetch = true
+    /// MLX MoE z úložiště: číst experty přes page cache (druhá úroveň cache ve volné RAM systému).
+    var mlxExpertPageCache = true
+    /// MLX MoE z úložiště: počítat přítomné experty, zatímco se chybějící čtou z flash.
+    /// Měření nedalo žádný měřitelný rozdíl (4,6–5,0 tok/s proti 5,1–5,2) – výchozí vypnuto.
+    var mlxExpertOverlap = false
     /// Přesnost KV cache u GGUF. Uplatní se jen při streamování expertů, kdy výpočet
     /// běží celý na CPU – tam je kvantovaná cache ověřená (na Metalu dává nesmysly,
     /// proto se jinde nepoužije). q8 uvolní polovinu paměti KV cache pro page cache
@@ -460,13 +485,17 @@ extension LocalModelSettings {
     }
 }
 
-/// Parametry společné pro Claude a Gemini.
+/// Parametry společné pro cloudové poskytovatele (Claude, Gemini, ChatGPT).
 struct CloudSettings: Codable, Equatable, Sendable {
     var claudeModel = "claude-sonnet-5"
     var geminiModel = "gemini-3.6-flash"
+    var openaiModel = "gpt-6-sol"
+    /// NVIDIA API Catalog – ID ve tvaru „výrobce/model“.
+    var nvidiaModel = "meta/llama-3.3-70b-instruct"
     var systemPrompt = "Jsi užitečný asistent. Odpovídej česky."
     var maxTokens = 8192
-    /// Jen Gemini. Claude od verze 4.7 teplotu nepřijímá, Gemini 3 ji doporučuje neměnit.
+    /// Gemini a modely OpenAI bez přemýšlení (GPT-4.x). Claude od verze 4.7 teplotu nepřijímá,
+    /// Gemini 3 ji doporučuje neměnit, přemýšlející modely OpenAI ji odmítají.
     var overrideTemperature = false
     var temperature = 1.0
     /// Délku promptu přizpůsobit tarifu účtu (limit vstupních tokenů za minutu).
@@ -477,6 +506,8 @@ struct CloudSettings: Codable, Equatable, Sendable {
     /// Přesný limit vstupních tokenů za minutu z konzole / AI Studia (má přednost před tarifem).
     var claudeInputPerMinute: Int?
     var geminiInputPerMinute: Int?
+    /// OpenAI: limit tokenů za minutu (vstup + výstup) z nastavení projektu.
+    var openaiInputPerMinute: Int?
 }
 
 extension LocalModelSettings {
@@ -509,6 +540,11 @@ extension LocalModelSettings {
         recordExpertTrace = try container.decodeIfPresent(Bool.self, forKey: .recordExpertTrace) ?? recordExpertTrace
         prefillWholeLayerPercent = try container.decodeIfPresent(Int.self, forKey: .prefillWholeLayerPercent) ?? prefillWholeLayerPercent
         prefetchAhead = try container.decodeIfPresent(Int.self, forKey: .prefetchAhead) ?? prefetchAhead
+        mlxStreamExperts = try container.decodeIfPresent(Bool.self, forKey: .mlxStreamExperts) ?? mlxStreamExperts
+        mlxExpertCacheMB = try container.decodeIfPresent(Int.self, forKey: .mlxExpertCacheMB) ?? mlxExpertCacheMB
+        mlxExpertPrefetch = try container.decodeIfPresent(Bool.self, forKey: .mlxExpertPrefetch) ?? mlxExpertPrefetch
+        mlxExpertPageCache = try container.decodeIfPresent(Bool.self, forKey: .mlxExpertPageCache) ?? mlxExpertPageCache
+        mlxExpertOverlap = try container.decodeIfPresent(Bool.self, forKey: .mlxExpertOverlap) ?? mlxExpertOverlap
         prefetchAheadFanout = try container.decodeIfPresent(Int.self, forKey: .prefetchAheadFanout) ?? prefetchAheadFanout
         streamingGPU = try container.decodeIfPresent(Bool.self, forKey: .streamingGPU) ?? streamingGPU
         repackDense = try container.decodeIfPresent(Bool.self, forKey: .repackDense) ?? repackDense
@@ -545,6 +581,8 @@ extension CloudSettings {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         claudeModel = try container.decodeIfPresent(String.self, forKey: .claudeModel) ?? claudeModel
         geminiModel = try container.decodeIfPresent(String.self, forKey: .geminiModel) ?? geminiModel
+        openaiModel = try container.decodeIfPresent(String.self, forKey: .openaiModel) ?? openaiModel
+        nvidiaModel = try container.decodeIfPresent(String.self, forKey: .nvidiaModel) ?? nvidiaModel
         systemPrompt = try container.decodeIfPresent(String.self, forKey: .systemPrompt) ?? systemPrompt
         maxTokens = try container.decodeIfPresent(Int.self, forKey: .maxTokens) ?? maxTokens
         overrideTemperature = try container.decodeIfPresent(Bool.self, forKey: .overrideTemperature) ?? overrideTemperature
@@ -554,6 +592,7 @@ extension CloudSettings {
         geminiTier = (try? container.decodeIfPresent(GeminiTier.self, forKey: .geminiTier)) ?? geminiTier
         claudeInputPerMinute = try container.decodeIfPresent(Int.self, forKey: .claudeInputPerMinute)
         geminiInputPerMinute = try container.decodeIfPresent(Int.self, forKey: .geminiInputPerMinute)
+        openaiInputPerMinute = try container.decodeIfPresent(Int.self, forKey: .openaiInputPerMinute)
     }
 }
 
@@ -713,6 +752,9 @@ final class SettingsStore {
         case .apple: nil
         case .claude: "claude:" + cloud.claudeModel
         case .gemini: "gemini:" + cloud.geminiModel
+        case .openai:
+            OpenAIProvider.Capabilities(model: cloud.openaiModel).isReasoning ? "openai:" + cloud.openaiModel : nil
+        case .nvidia: "nvidia:" + cloud.nvidiaModel
         }
     }
 
@@ -748,6 +790,16 @@ final class SettingsStore {
         if provider == .gemini, cloud.geminiModel.lowercased().contains("pro") {
             return "Modely Gemini Pro přemýšlení úplně vypnout neumí, jen ho omezí na minimum."
         }
+        if provider == .openai {
+            let caps = OpenAIProvider.Capabilities(model: cloud.openaiModel)
+            if !caps.isReasoning { return "Tento model přemýšlení nepodporuje." }
+            if caps.lowestEffort != "none" {
+                return "Tento model přemýšlení úplně vypnout neumí, vypnutím se omezí na minimum."
+            }
+        }
+        if provider == .nvidia {
+            return "Přepínač funguje u modelů, které přemýšlení řídí šablonou (DeepSeek V3.1+, Qwen3 a další). Modely bez přemýšlení ho ignorují, čistě přemýšlející (např. DeepSeek R1) přemýšlí vždy."
+        }
         return nil
     }
 
@@ -760,6 +812,8 @@ final class SettingsStore {
         case .apple: "Model v zařízení"
         case .claude: cloud.claudeModel
         case .gemini: cloud.geminiModel
+        case .openai: cloud.openaiModel
+        case .nvidia: cloud.nvidiaModel
         }
     }
 
@@ -771,7 +825,7 @@ final class SettingsStore {
         switch provider {
         case .local: min(local.contextLength, LocalRuntime.shared.memoryLimitedContext ?? .max)
         case .apple: 4096
-        case .claude, .gemini: cloudPlan(for: provider).effectiveWindow
+        case .claude, .gemini, .openai, .nvidia: cloudPlan(for: provider).effectiveWindow
         }
     }
 
@@ -791,20 +845,31 @@ final class SettingsStore {
         switch provider {
         case .claude: cloud.claudeTier.limits(model: cloud.claudeModel)
         case .gemini: cloud.geminiTier.limits
-        case .local, .apple: nil
+        // OpenAI limity po modelech a tarifech nezveřejňuje v pevné tabulce – zjistí se z hlaviček.
+        case .openai, .nvidia, .local, .apple: nil
         }
     }
 
     /// Limit vstupu za minutu, se kterým se plánuje: ruční hodnota > vybraný tarif.
     /// nil = automaticky (zjištěno z API).
     func tierInputPerMinute(for provider: AIProvider) -> Int? {
-        let manual = provider == .claude ? cloud.claudeInputPerMinute : cloud.geminiInputPerMinute
+        let manual: Int? = switch provider {
+        case .claude: cloud.claudeInputPerMinute
+        case .gemini: cloud.geminiInputPerMinute
+        case .openai: cloud.openaiInputPerMinute
+        case .nvidia, .local, .apple: nil
+        }
         if let manual, manual > 0 { return manual }
         return tierLimits(for: provider)?.inputPerMinute
     }
 
     func cloudModel(for provider: AIProvider) -> String {
-        provider == .gemini ? cloud.geminiModel : cloud.claudeModel
+        switch provider {
+        case .gemini: cloud.geminiModel
+        case .openai: cloud.openaiModel
+        case .nvidia: cloud.nvidiaModel
+        default: cloud.claudeModel
+        }
     }
 
     /// Mění se s modelem – podle toho se znovu načtou jeho limity.
@@ -813,7 +878,7 @@ final class SettingsStore {
     /// Okno a max. odpověď cloudového modelu z Models API (jednou za týden, `force` = hned).
     func refreshCloudModelInfo(for provider: AIProvider? = nil, force: Bool = false) async {
         let provider = provider ?? self.provider
-        guard provider == .claude || provider == .gemini, let key = apiKey(for: provider) else { return }
+        guard provider.isCloud, let key = apiKey(for: provider) else { return }
         await CloudLimitsStore.shared.refreshModelInfo(
             provider: provider,
             model: cloudModel(for: provider),
@@ -865,7 +930,7 @@ final class SettingsStore {
                 temperature: local.applying(profile).temperature,
                 maxTokens: local.maxTokens
             )
-        case .claude, .gemini:
+        case .claude, .gemini, .openai, .nvidia:
             return try cloudProvider(for: provider)
         }
     }
@@ -896,6 +961,26 @@ final class SettingsStore {
                 reasoning: reasoning,
                 adaptToTier: cloud.adaptToTier,
                 tierInputPerMinute: tierInputPerMinute(for: .gemini)
+            )
+        case .openai:
+            return OpenAIProvider(
+                apiKey: key,
+                model: cloud.openaiModel,
+                systemPrompt: cloud.systemPrompt,
+                maxTokens: maxTokens ?? cloud.maxTokens,
+                temperature: cloud.overrideTemperature ? cloud.temperature : nil,
+                reasoning: reasoning,
+                adaptToTier: cloud.adaptToTier,
+                tierInputPerMinute: tierInputPerMinute(for: .openai)
+            )
+        case .nvidia:
+            return NvidiaProvider(
+                apiKey: key,
+                model: cloud.nvidiaModel,
+                systemPrompt: cloud.systemPrompt,
+                maxTokens: maxTokens ?? cloud.maxTokens,
+                temperature: cloud.overrideTemperature ? cloud.temperature : nil,
+                reasoning: reasoning
             )
         default:
             throw ProviderError.notConfigured("\(provider.title) není cloudová služba.")

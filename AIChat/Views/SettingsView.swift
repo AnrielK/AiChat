@@ -65,7 +65,7 @@ struct SettingsView: View {
                 }
 
                 Section("Cloud") {
-                    ForEach([AIProvider.claude, .gemini]) { provider in
+                    ForEach(AIProvider.cloud) { provider in
                         NavigationLink {
                             CloudProviderView(provider: provider)
                         } label: {
@@ -148,7 +148,7 @@ struct SettingsView: View {
             AppleIntelligenceProvider.availabilityMessage
                 ?? AppleIntelligenceProvider.languageNotice
                 ?? "Vestavěný model Apple – nic se nestahuje, běží offline."
-        case .claude, .gemini:
+        case .claude, .gemini, .openai, .nvidia:
             settings.isConnected(settings.provider)
                 ? "Zprávy se posílají do cloudu přes tvůj API klíč."
                 : "Nejdřív níže vlož API klíč pro \(settings.provider.title)."

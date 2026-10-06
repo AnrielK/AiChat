@@ -25,6 +25,17 @@ struct DatasetImportView: View {
     @State private var mapping = DatasetMapping()
     @State private var limit = 200
     @State private var onlyCzech = true
+    @State private var order: ImportOrder = .sequential
+    @State private var startOffset = 0
+    @State private var labelColumns: [HuggingFaceDataset.LabelColumn] = []
+    @State private var filterColumn = ""
+    @State private var filterValue = ""
+    /// Úsek splitu, ve kterém leží řádky vybrané filtrem. nil = celý split
+    /// (bez filtru, nebo když řádky s hodnotou nejsou pohromadě).
+    @State private var filterRange: Range<Int>?
+    @State private var filterNote = ""
+    @State private var isLocating = false
+    @State private var splitTotal = 0
 
     @State private var isLoading = false
     @State private var isImporting = false
@@ -33,6 +44,40 @@ struct DatasetImportView: View {
     @State private var errorMessage: String?
     @State private var showFileImporter = false
     @State private var localFiles: [URL] = []
+
+    /// Jak se berou řádky ze splitu. Kolekce poskládané z více zdrojů bývají
+    /// seřazené podle zdroje, takže čtení od začátku dá jen ten první.
+    enum ImportOrder: String, CaseIterable {
+        case sequential
+        case random
+
+        var label: String {
+            switch self {
+            case .sequential: "Po sobě"
+            case .random: "Náhodně"
+            }
+        }
+    }
+
+    /// Kolik řádků se v náhodném režimu bere z jednoho místa. Menší blok znamená
+    /// pestřejší výběr, ale víc požadavků – 20 je rozumný střed.
+    private static let randomBlock = 20
+
+    /// Řádky, ze kterých se importuje.
+    private var rowRange: Range<Int> {
+        filterRange ?? 0 ..< splitTotal
+    }
+
+    /// Nejvýš tolik požadavků na jeden import. Filtr bez nalezeného úseku by
+    /// jinak mohl číst celý split po stovkách řádků.
+    private static let requestCap = 300
+
+    private var activeFilter: HuggingFaceDataset.Filter? {
+        guard !filterColumn.isEmpty, !filterValue.isEmpty,
+              let column = labelColumns.first(where: { $0.name == filterColumn })
+        else { return nil }
+        return HuggingFaceDataset.Filter(column: column.name, value: filterValue, isBool: column.isBool)
+    }
 
     /// Zadání, která už v datasetu jsou – ať se stejný řádek nenaimportuje dvakrát.
     private var existingPrompts: Set<String> {
@@ -44,7 +89,10 @@ struct DatasetImportView: View {
             Form {
                 sourceSection
                 if !splits.isEmpty { splitSection }
-                if let page { mappingSection(page) }
+                if let page {
+                    mappingSection(page)
+                    selectionSection(page)
+                }
                 optionsSection
                 if !status.isEmpty { Section { Text(status).font(.caption).foregroundStyle(.secondary) } }
             }
@@ -56,7 +104,7 @@ struct DatasetImportView: View {
                 }
                 ToolbarItem(placement: .confirmationAction) {
                     Button(isImporting ? "\(progress)" : "Importovat") { startImport() }
-                        .disabled(!mapping.isComplete || isImporting || page == nil)
+                        .disabled(!mapping.isComplete || isImporting || isLoading || isLocating || page == nil)
                 }
             }
             .fileImporter(
@@ -235,7 +283,7 @@ struct DatasetImportView: View {
                 }
             }
             .pickerStyle(.menu)
-            .onChange(of: selectedSplit) { _, _ in loadPreview() }
+            .onChange(of: selectedSplit) { _, _ in splitChanged() }
         }
     }
 
@@ -274,7 +322,7 @@ struct DatasetImportView: View {
         } header: {
             Text("Sloupce")
         } footer: {
-            Text("Split má \(page.total) řádků. Ukázka výše je první použitelná dvojice – když nesedí, přepni sloupce.")
+            Text("\(filterRange == nil ? "Split má \(page.total)" : "Výběr s filtrem má \(rowRange.count)") řádků. Ukázka výše je první použitelná dvojice – když nesedí, přepni sloupce.")
         }
     }
 
@@ -289,6 +337,79 @@ struct DatasetImportView: View {
             if allowsNone { Text("žádný").tag("") }
             ForEach(columns, id: \.self) { Text($0).tag($0) }
         }
+    }
+
+    // MARK: - Výběr řádků
+
+    @ViewBuilder
+    private func selectionSection(_ page: HuggingFaceDataset.Page) -> some View {
+        Section {
+            Picker("Pořadí", selection: $order) {
+                ForEach(ImportOrder.allCases, id: \.self) { Text($0.label).tag($0) }
+            }
+            .pickerStyle(.segmented)
+
+            if order == .sequential {
+                LabeledContent("Začít od řádku") {
+                    TextField("0", value: $startOffset, format: .number)
+                        .keyboardType(.numberPad)
+                        .multilineTextAlignment(.trailing)
+                }
+            }
+
+            if !labelColumns.isEmpty {
+                Picker("Filtr", selection: $filterColumn) {
+                    Text("žádný").tag("")
+                    ForEach(labelColumns) { Text($0.name).tag($0.name) }
+                }
+                .onChange(of: filterColumn) { _, _ in
+                    filterValue = ""
+                    applyFilter()
+                }
+
+                if let column = labelColumns.first(where: { $0.name == filterColumn }) {
+                    Picker("Hodnota", selection: $filterValue) {
+                        Text("vyber").tag("")
+                        ForEach(column.values, id: \.value) { item in
+                            Text("\(item.value) (\(item.count))").tag(item.value)
+                        }
+                    }
+                    .onChange(of: filterValue) { _, _ in applyFilter() }
+                }
+
+                if isLocating {
+                    HStack {
+                        ProgressView()
+                        Text("Hledám, kde řádky leží…").foregroundStyle(.secondary)
+                    }
+                } else if !filterNote.isEmpty {
+                    Text(filterNote).font(.caption).foregroundStyle(.secondary)
+                }
+            }
+        } header: {
+            Text("Výběr řádků")
+        } footer: {
+            Text(selectionFooter(total: page.total))
+        }
+    }
+
+    private func selectionFooter(total: Int) -> String {
+        var parts: [String] = []
+        switch order {
+        case .sequential:
+            parts.append(filterRange == nil
+                         ? "Čte se od zadaného řádku dál."
+                         : "Čte se od zadaného řádku dál, počítáno od začátku úseku s filtrem.")
+            if startOffset >= rowRange.count { parts.append("Zadaný řádek je za koncem (\(rowRange.count) řádků).") }
+        case .random:
+            parts.append("Bere se po \(Self.randomBlock) řádcích z náhodných míst celého \(activeFilter == nil ? "splitu" : "výběru"), takže import trvá déle než po sobě.")
+        }
+        if labelColumns.isEmpty {
+            parts.append("Filtr podle sloupce tu není – prohlížeč datasetů pro tenhle split nemá statistiky.")
+        } else {
+            parts.append("Filtr nabízí sloupce s malým počtem hodnot, třeba zdroj dat, a čísla v závorce jsou počty řádků. Když řádky s hodnotou leží pohromadě, najde se jejich úsek a čte se jen z něj.")
+        }
+        return parts.joined(separator: " ")
     }
 
     // MARK: - Volby
@@ -320,7 +441,7 @@ struct DatasetImportView: View {
             do {
                 splits = try await HuggingFaceDataset.splits(dataset: id)
                 selectedSplit = splits.first
-                loadPreview()
+                splitChanged()
             } catch {
                 errorMessage = error.localizedDescription
                 splits = []
@@ -329,16 +450,41 @@ struct DatasetImportView: View {
         }
     }
 
+    /// Nový split: filtr z předchozího už nemusí platit, statistiky se načtou znovu.
+    private func splitChanged() {
+        filterColumn = ""
+        filterValue = ""
+        filterRange = nil
+        filterNote = ""
+        labelColumns = []
+        startOffset = 0
+        loadPreview()
+        guard let split = selectedSplit else { return }
+        let dataset = datasetID
+        Task {
+            // Bez statistik se dá importovat dál, jen bez filtru – chyba se nehlásí.
+            let columns = (try? await HuggingFaceDataset.labelColumns(dataset: dataset, split: split)) ?? []
+            if selectedSplit == split { labelColumns = columns }
+        }
+    }
+
     private func loadPreview() {
         guard let split = selectedSplit else { return }
         isLoading = true
+        let offset = filterRange?.lowerBound ?? 0
         Task {
             do {
                 let preview = try await HuggingFaceDataset.page(
-                    dataset: datasetID, split: split, offset: 0, length: HuggingFaceDataset.pageLimit
+                    dataset: datasetID, split: split, offset: offset,
+                    length: HuggingFaceDataset.pageLimit
                 )
+                // Mezitím se filtr mohl změnit – starší odpověď by přepsala novější.
+                guard offset == (filterRange?.lowerBound ?? 0) else { return }
+                // Ruční mapování přežije změnu filtru, pokud sloupce zůstaly stejné.
+                let keepMapping = page?.columns == preview.columns && mapping.isComplete
                 page = preview
-                mapping = DatasetMapping.autodetect(page: preview)
+                splitTotal = preview.total
+                if !keepMapping { mapping = DatasetMapping.autodetect(page: preview) }
             } catch {
                 errorMessage = error.localizedDescription
                 page = nil
@@ -347,40 +493,108 @@ struct DatasetImportView: View {
         }
     }
 
+    /// Najde úsek s vybranou hodnotou. Filtr se vyhodnocuje v aplikaci – endpoint
+    /// `/filter` prohlížeče datasetů u větších datasetů padá nebo nestíhá.
+    private func applyFilter() {
+        filterRange = nil
+        filterNote = ""
+        startOffset = 0
+        guard let filter = activeFilter, let split = selectedSplit else {
+            isLocating = false
+            loadPreview()
+            return
+        }
+        let expected = labelColumns.first(where: { $0.name == filter.column })?
+            .values.first(where: { $0.value == filter.value })?.count ?? 0
+        let dataset = datasetID
+        let total = splitTotal
+        isLocating = true
+        Task {
+            do {
+                let range = try await HuggingFaceDataset.locate(
+                    dataset: dataset, split: split, filter: filter,
+                    expected: expected, total: total
+                )
+                guard filter == activeFilter else { return }
+                filterRange = range
+                if let range {
+                    filterNote = "Řádky \(range.lowerBound + 1)–\(range.upperBound) (\(range.count))."
+                } else {
+                    filterNote = "Řádky s touhle hodnotou nejsou pohromadě, filtr se uplatní až při čtení. Import projde split po stovkách řádků (nejvýš \(Self.requestCap) požadavků) a u vzácné hodnoty najde málo vzorků."
+                }
+                loadPreview()
+            } catch {
+                guard filter == activeFilter else { return }
+                errorMessage = error.localizedDescription
+                filterNote = "Úsek se nepodařilo najít, filtr se uplatní až při čtení."
+            }
+            isLocating = false
+        }
+    }
+
     // MARK: - Import
 
     private func startImport() {
-        guard let split = selectedSplit else { return }
+        guard let split = selectedSplit, page != nil else { return }
         isImporting = true
         progress = 0
-        var seen = existingPrompts
-        var added = 0
-        var skipped = 0
+        let dataset = datasetID
+        let filter = activeFilter
+        let range = rowRange
+        let selectedOrder = order
+        let firstRow = range.lowerBound + max(0, startOffset)
 
         Task {
-            var offset = 0
-            do {
-                while added < limit {
-                    let chunk = try await HuggingFaceDataset.page(
-                        dataset: datasetID, split: split,
-                        offset: offset, length: HuggingFaceDataset.pageLimit
-                    )
-                    if chunk.rows.isEmpty { break }
-                    offset += chunk.rows.count
+            var seen = existingPrompts
+            var added = 0
+            var skipped = 0
+            var requests = 0
 
-                    for row in chunk.rows where added < limit {
-                        guard let pair = mapping.pair(from: row) else { skipped += 1; continue }
-                        guard !seen.contains(pair.prompt) else { skipped += 1; continue }
-                        guard !onlyCzech || DatasetFilter.looksCzech(pair.answer) else { skipped += 1; continue }
-                        seen.insert(pair.prompt)
-                        insert(pair, source: "hf:" + datasetID)
-                        added += 1
-                        progress = added
+            func consider(_ row: [String: HuggingFaceDataset.Cell]) {
+                // Na okrajích úseku, nebo když úsek není, projdou i řádky mimo filtr.
+                if let filter, !filter.matches(row) { return }
+                guard let pair = mapping.pair(from: row) else { skipped += 1; return }
+                guard !seen.contains(pair.prompt) else { skipped += 1; return }
+                guard !onlyCzech || DatasetFilter.looksCzech(pair.answer) else { skipped += 1; return }
+                seen.insert(pair.prompt)
+                insert(pair, source: "hf:" + dataset)
+                added += 1
+                progress = added
+            }
+
+            do {
+                switch selectedOrder {
+                case .sequential:
+                    var offset = firstRow
+                    while added < limit, offset < range.upperBound, requests < Self.requestCap {
+                        let chunk = try await HuggingFaceDataset.page(
+                            dataset: dataset, split: split, offset: offset,
+                            length: min(HuggingFaceDataset.pageLimit, range.upperBound - offset)
+                        )
+                        requests += 1
+                        if chunk.rows.isEmpty { break }
+                        offset += chunk.rows.count
+                        for row in chunk.rows where added < limit { consider(row) }
                     }
-                    if offset >= chunk.total { break }
+
+                case .random:
+                    // Náhodné bloky místo náhodných řádků: jeden požadavek na blok
+                    // a pořád dost míst napříč splitem, aby se promíchaly zdroje.
+                    var starts = Array(stride(from: range.lowerBound, to: range.upperBound, by: Self.randomBlock)).shuffled()
+                    while added < limit, requests < Self.requestCap, let start = starts.popLast() {
+                        let chunk = try await HuggingFaceDataset.page(
+                            dataset: dataset, split: split, offset: start,
+                            length: min(Self.randomBlock, range.upperBound - start)
+                        )
+                        requests += 1
+                        for row in chunk.rows.shuffled() where added < limit { consider(row) }
+                    }
                 }
                 try? context.save()
                 status = "Přidáno \(added), přeskočeno \(skipped)."
+                if requests >= Self.requestCap, added < limit {
+                    status += " Zastaveno po \(Self.requestCap) požadavcích."
+                }
                 if added > 0 { dismiss() }
             } catch {
                 try? context.save()

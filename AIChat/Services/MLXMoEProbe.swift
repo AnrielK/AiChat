@@ -33,6 +33,13 @@ enum MLXMoEProbe {
         let pipelineRead: Double
         let pipelineUpload: Double
         let bytesPerToken: Int
+        /// Rozbor čekání (ms na jedno eval): holé eval malé operace, s výběrem top-k a čtením
+        /// indexů na CPU, a eval vrstvy (attention + experti) bez routeru.
+        let evalTrivialMs: Double
+        let evalTopKMs: Double
+        let evalLayerMs: Double
+        /// Jako `gpuSynced`, ale vrstva je zkompilovaná (`compile`): méně práce CPU na každé eval.
+        let gpuSyncedCompiled: Double
 
         /// Cena jednoho čekání na GPU (ms).
         var syncPerLayerMs: Double { max(0, gpuSynced - gpuBatched) / Double(max(1, layers)) * 1000 }
@@ -232,6 +239,81 @@ enum MLXMoEProbe {
             if token >= warmupTokens { synced += now() - start }
         }
 
+        // 2b. Odkud je cena čekání: holé eval, eval s top-k a čtením indexů, eval vrstvy bez routeru.
+        var trivial = 0.0
+        var topK = 0.0
+        var layerEval = 0.0
+        do {
+            var y = MLXArray.zeros([1, dims.hidden], type: Float16.self)
+            var z = MLXArray.zeros([1, dims.experts], type: Float16.self)
+            eval(y, z)
+            for token in 0 ..< warmupTokens + tokens {
+                let measured = token >= warmupTokens
+                var start = now()
+                for _ in 0 ..< dims.layers {
+                    y = y + 1
+                    eval(y)
+                }
+                if measured { trivial += now() - start }
+
+                start = now()
+                for _ in 0 ..< dims.layers {
+                    z = z + 1
+                    let order = argPartition(negative(z), kth: dims.used - 1, axis: -1)
+                    eval(order)
+                    _ = order.asArray(UInt32.self)
+                }
+                if measured { topK += now() - start }
+
+                start = now()
+                var x = input
+                for index in 0 ..< dims.layers {
+                    x = moe(attention(x, layers[index]), resident[index])
+                    eval(x)
+                }
+                eval(finish(x))
+                if measured { layerEval += now() - start }
+            }
+        }
+
+        // 2c. Jako 2, ale attention + router a experti jsou zkompilované funkce. Rozbor ukázal,
+        // že holé eval stojí ~0,7 ms, ale vrstva po vrstvě se výpočet protáhne o víc – podezřelá
+        // je příprava grafu na CPU, která se při čekání nepřekrývá s výpočtem GPU.
+        let usedCount = dims.used
+        let compiledAttention = compile { (inputs: [MLXArray]) -> [MLXArray] in
+            let x = inputs[0]
+            func q(_ offset: Int) -> Quant { Quant(w: inputs[offset], scales: inputs[offset + 1], biases: inputs[offset + 2]) }
+            let layer = Layer(q: q(1), k: q(4), v: q(7), o: q(10), router: inputs[13])
+            let h = Self.attention(x, layer)
+            let order = argPartition(negative(Self.routerLogits(h, layer)), kth: usedCount - 1, axis: -1)
+            return [h, order]
+        }
+        let compiledExperts = compile { (inputs: [MLXArray]) -> [MLXArray] in
+            var experts: [Expert] = []
+            var offset = 1
+            while offset + 9 <= inputs.count {
+                func q(_ at: Int) -> Quant { Quant(w: inputs[at], scales: inputs[at + 1], biases: inputs[at + 2]) }
+                experts.append(Expert(gate: q(offset), up: q(offset + 3), down: q(offset + 6)))
+                offset += 9
+            }
+            return [Self.moe(inputs[0], experts)]
+        }
+        func flat(_ q: Quant) -> [MLXArray] { [q.w, q.scales, q.biases] }
+        var syncedCompiled = 0.0
+        for token in 0 ..< warmupTokens + tokens {
+            let start = now()
+            var x = input
+            for index in 0 ..< dims.layers {
+                let layer = layers[index]
+                let out = compiledAttention([x] + flat(layer.q) + flat(layer.k) + flat(layer.v) + flat(layer.o) + [layer.router])
+                eval(out[1])
+                _ = out[1].asArray(UInt32.self).prefix(dims.used)
+                x = compiledExperts([out[0]] + resident[index].flatMap { flat($0.gate) + flat($0.up) + flat($0.down) })[0]
+            }
+            eval(finish(x))
+            if token >= warmupTokens { syncedCompiled += now() - start }
+        }
+
         // 3. Celý průchod se čtením expertů ze souboru.
         let plan = ExpertPlan(path: path, layout: layout, layers: dims.layers, used: dims.used,
                               tokens: warmupTokens + tokens)
@@ -337,7 +419,11 @@ enum MLXMoEProbe {
             pipeline: pipeline / count,
             pipelineRead: readTime / count,
             pipelineUpload: uploadTime / count,
-            bytesPerToken: readBytes / max(1, tokens)
+            bytesPerToken: readBytes / max(1, tokens),
+            evalTrivialMs: trivial / count / Double(dims.layers) * 1000,
+            evalTopKMs: topK / count / Double(dims.layers) * 1000,
+            evalLayerMs: max(0, layerEval - batched) / count / Double(dims.layers) * 1000,
+            gpuSyncedCompiled: syncedCompiled / count
         )
         log.notice("""
             test MLX MoE (\(result.summary), experti: \(result.source)): \
@@ -347,7 +433,11 @@ enum MLXMoEProbe {
             (\(result.bytesPerToken / 1_048_576) MB, \(String(format: "%.2f", result.readGigabytesPerSecond)) GB/s), \
             kopie do MLX \(ms(result.pipelineUpload)) ms · \
             strop \(String(format: "%.1f", result.serialTokensPerSecond)) tok/s bez předčítání, \
-            \(String(format: "%.1f", result.overlapTokensPerSecond)) tok/s s ideálním předčítáním
+            \(String(format: "%.1f", result.overlapTokensPerSecond)) tok/s s ideálním předčítáním · \
+            rozbor čekání na jedno eval: holé \(String(format: "%.2f", result.evalTrivialMs)) ms, \
+            s top-k a čtením indexů \(String(format: "%.2f", result.evalTopKMs)) ms, \
+            vrstva bez routeru +\(String(format: "%.2f", result.evalLayerMs)) ms · \
+            s čekáním a kompilovanou vrstvou \(ms(result.gpuSyncedCompiled)) ms/token
             """)
         return result
     }

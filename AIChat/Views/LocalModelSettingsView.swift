@@ -10,6 +10,8 @@ struct LocalModelSettingsView: View {
     /// Test, jestli by se vyplatilo streamovat experty MoE přes MLX (`MLXMoEProbe`).
     @State private var probing = false
     @State private var probeLines: [(String, String)] = []
+    @State private var readTestLines: [(String, String)] = []
+    @State private var readTesting = false
 
     private let contextOptions = [1024, 2048, 4096, 8192, 16384, 32768, 65536, 131_072]
 
@@ -139,6 +141,40 @@ struct LocalModelSettingsView: View {
                             }
                         }
                         Text("MoE model: kolik expertů smí router v každé vrstvě vybrat. Méně expertů = rychlejší generování i prompt (výpočet MoE vrstev roste s jejich počtem), ale RAM se neušetří – u MLX leží všichni experti v paměti. 8→6 bývá skoro bez rozdílu v kvalitě, 8→4 už znát je. Změna model znovu načte.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                        Toggle("Experty z úložiště (experiment)", isOn: $settings.local.mlxStreamExperts)
+                        if settings.local.mlxStreamExperts {
+                            Picker("Cache expertů", selection: $settings.local.mlxExpertCacheMB) {
+                                ForEach([2048, 2560, 3072, 3584, 4096], id: \.self) { Text("\($0) MB").tag($0) }
+                            }
+                            Toggle("Předčítat podle odhadu", isOn: $settings.local.mlxExpertPrefetch)
+                            Toggle("Page cache jako druhá úroveň", isOn: $settings.local.mlxExpertPageCache)
+                            Toggle("Počítat během čtení", isOn: $settings.local.mlxExpertOverlap)
+                            Button {
+                                runReadTest()
+                            } label: {
+                                if readTesting {
+                                    HStack { ProgressView(); Text("Měřím čtení…") }
+                                } else {
+                                    Label("Test čtení expertů", systemImage: "internaldrive")
+                                }
+                            }
+                            .disabled(readTesting)
+                            Button {
+                                runCompressionTest()
+                            } label: {
+                                Label("Test komprese expertů", systemImage: "archivebox")
+                            }
+                            .disabled(readTesting)
+                            ForEach(readTestLines.indices, id: \.self) { index in
+                                LabeledContent(readTestLines[index].0) {
+                                    Text(readTestLines[index].1).monospacedDigit()
+                                }
+                                .font(.footnote)
+                            }
+                        }
+                        Text("Experty z úložiště: pro MoE, které se nevejde do RAM (Qwen3-30B-A3B v MLX 4bit). V paměti zůstane hustá část a cache expertů; expert, který v cache chybí, se přečte z flash přímo do paměti GPU. Zatím jen Qwen3-MoE ve formátu mlx-community. Předčítání podle odhadu: z routeru další vrstvy se odhadne, které experty vybere, a čtou se na pozadí, zatímco se počítá tahle vrstva. Log enginu po odpovědi ukáže zásah cache, kolik se četlo ve výpočtu a kolik na pozadí. Page cache jako druhá úroveň: experti se čtou přes systémovou cache souboru, takže expert vyhozený ze slotu se místo z flash často jen zkopíruje z volné RAM (ta se do limitu appky nepočítá). Vypnuto = čtení vždy z flash bez page cache. Velikost cache ubírá z kontextu – když log hlásí malý kontext, zvedni strop paměti v Parametrech › Paměť nebo zmenši cache. Změna cache model znovu načte.")
                             .font(.caption)
                             .foregroundStyle(.secondary)
                     }
@@ -567,11 +603,72 @@ struct LocalModelSettingsView: View {
                     ("Kopie do MLX", ms(result.pipelineUpload)),
                     ("Celý průchod", ms(result.pipeline) + String(format: " → %.1f tok/s", result.serialTokensPerSecond)),
                     ("S ideálním předčítáním", String(format: "≤ %.1f tok/s", result.overlapTokensPerSecond)),
+                    ("Eval: holé / s top-k", String(format: "%.2f / %.2f ms", result.evalTrivialMs, result.evalTopKMs)),
+                    ("Eval vrstvy bez routeru", String(format: "+%.2f ms na vrstvu", result.evalLayerMs)),
+                    ("S čekáním, vrstva zkompilovaná", ms(result.gpuSyncedCompiled) + " / token"),
                 ]
             case .failure(let error):
                 probeLines = [("Chyba", error.localizedDescription)]
             }
             probing = false
+        }
+        #endif
+    }
+
+    /// Rychlost čtení expertů vybraného MLX modelu: jak leží v souborech vs. souvislé bloky.
+    private func runReadTest() {
+        #if canImport(MLXLLM)
+        guard let id = settings.selectedLocalModel, let directory = MLXExperts.directory(forID: id) else { return }
+        readTesting = true
+        readTestLines = []
+        Task {
+            let result = await Task.detached(priority: .userInitiated) { () -> MLXExpertStore.ReadBenchmark? in
+                guard let plan = MLXExpertStore.plan(directory: directory, cacheBytes: 0) else { return nil }
+                return MLXExpertStore.benchmarkReads(plan: plan)
+            }.value
+            if let result {
+                readTestLines = [
+                    ("Jako teď (9 kousků)", String(format: "%.2f GB/s", result.scattered)),
+                    ("Souvislý blok", String(format: "%.2f GB/s", result.contiguous)),
+                    ("Souvislý, 4 kousky", String(format: "%.2f GB/s", result.contiguousSplit)),
+                    ("Vzorek", "\(result.experts) expertů po \(result.expertBytes / 1024) kB"),
+                ]
+                EngineLog(category: "mlx").notice(String(
+                    format: "test čtení expertů: jako teď %.2f GB/s · souvislý blok %.2f GB/s · souvislý ve 4 kouscích %.2f GB/s (%d expertů po %d kB, 6 souběžně, bez page cache)",
+                    result.scattered, result.contiguous, result.contiguousSplit, result.experts, result.expertBytes / 1024))
+            } else {
+                readTestLines = [("Chyba", "Model nemá experty ve formátu switch_mlp")]
+            }
+            readTesting = false
+        }
+        #endif
+    }
+
+    /// Kolik by ušetřila komprese expertů a jestli rozbalení na CPU stíhá flash.
+    private func runCompressionTest() {
+        #if canImport(MLXLLM)
+        guard let id = settings.selectedLocalModel, let directory = MLXExperts.directory(forID: id) else { return }
+        readTesting = true
+        readTestLines = []
+        Task {
+            let results = await Task.detached(priority: .userInitiated) { () -> [MLXExpertStore.CompressionResult] in
+                guard let plan = MLXExpertStore.plan(directory: directory, cacheBytes: 0) else { return [] }
+                return MLXExpertStore.benchmarkCompression(plan: plan)
+            }.value
+            if results.isEmpty {
+                readTestLines = [("Chyba", "Model nemá experty ve formátu switch_mlp")]
+            }
+            for result in results {
+                readTestLines.append((result.algorithm, String(
+                    format: "%.1f %% velikosti (váhy %.1f %%, škály %.1f %%) · rozbalení %.1f / %.1f GB/s · efektivně %.2f GB/s",
+                    result.ratio * 100, result.weightRatio * 100, result.scaleRatio * 100,
+                    result.decodeSingle, result.decodeParallel, result.effective(flash: 1.45))))
+                EngineLog(category: "mlx").notice(String(
+                    format: "test komprese expertů %@: %.1f %% velikosti (váhy %.1f %%, škály a posuny %.1f %%) · rozbalení 1 jádro %.2f GB/s, všechna %.2f GB/s · efektivní čtení při 1,45 GB/s z flash %.2f GB/s",
+                    result.algorithm, result.ratio * 100, result.weightRatio * 100, result.scaleRatio * 100,
+                    result.decodeSingle, result.decodeParallel, result.effective(flash: 1.45)))
+            }
+            readTesting = false
         }
         #endif
     }

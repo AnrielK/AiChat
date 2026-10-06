@@ -22,13 +22,40 @@ public struct Summarizer: Sendable {
         public let sections: [(item: String, title: String, summary: String)]
         public let executiveSummary: String
         public let keyFigures: KeyFigures
+        /// Jazyk souhrnu („Czech“ → české popisky oddílů a čísel).
+        public var language: String = "English"
 
-        /// Markdown document (for a "Summary" sheet, notes, or display).
+        public var isCzech: Bool { language.lowercased().hasPrefix("cz") || language.lowercased().hasPrefix("če") }
+
+        /// Šablona vyplněná modelem; nil = model ji nedodržel (zobrazí se text, jak je).
+        public var brief: SummaryBrief? { SummaryBrief.parse(executiveSummary) }
+
+        /// Markdown pro náhled v appce – stejné pořadí oddílů jako list Souhrn.
         public func markdown(company: String) -> String {
-            var s = "# \(company) — 10-K FY\(keyFigures.fiscalYear)\n\n## Executive summary\n\n\(executiveSummary)\n\n"
-            s += "## Key figures (from XBRL)\n\n\(keyFigures.table())\n\n"
-            for sec in sections { s += "## Item \(sec.item) — \(sec.title)\n\n\(sec.summary)\n\n" }
+            let czech = isCzech
+            var s = "# \(company) — 10-K FY\(keyFigures.fiscalYear)\n\n"
+            if let brief {
+                let parts = brief.markdown(czech: czech).components(separatedBy: "\n\n## ")
+                // Teze nahoře, pak klíčová čísla, pak ostatní oddíly.
+                s += (parts.first ?? "") + "\n\n"
+                s += "## " + (czech ? "Klíčová čísla (z XBRL)" : "Key figures (from XBRL)") + "\n\n" + figuresMarkdown(czech: czech) + "\n\n"
+                s += parts.dropFirst().map { "## " + $0 }.joined(separator: "\n\n") + "\n"
+            } else {
+                s += "## " + (czech ? "Shrnutí" : "Executive summary") + "\n\n\(executiveSummary)\n\n"
+                s += "## " + (czech ? "Klíčová čísla (z XBRL)" : "Key figures (from XBRL)") + "\n\n" + figuresMarkdown(czech: czech) + "\n"
+            }
             return s
+        }
+
+        func figuresMarkdown(czech: Bool) -> String {
+            let fy = keyFigures.fiscalYear
+            var rows = ["| \(czech ? "Ukazatel" : "Metric") | FY\(fy) | FY\(fy - 1) | \(czech ? "Změna" : "Change") |",
+                        "|---|---:|---:|---:|"]
+            for line in keyFigures.briefLines {
+                rows.append("| \(KeyFigures.displayName(line.name, czech: czech)) | \(KeyFigures.format(line.current, line.kind)) | "
+                            + "\(KeyFigures.format(line.prior, line.kind)) | \(KeyFigures.changeText(line)) |")
+            }
+            return rows.joined(separator: "\n")
         }
     }
 
@@ -96,18 +123,19 @@ public struct Summarizer: Sendable {
 
         progress(.final)
         let joined = out.map { "### Item \($0.0) — \($0.1)\n\($0.2)" }.joined(separator: "\n\n")
-        let finalPrompt = """
-        Write an executive summary (max ~250 words) of \(company)'s 10-K for fiscal year \(keyFigures.fiscalYear), \
-        followed by "Key risks" (3–5 bullets) and "What to watch for the valuation" (3–5 bullets: \
-        revenue growth, margins, capex, capital returns).
-        Use ONLY these verified figures when citing numbers:
-        \(keyFigures.table())
-
-        Section summaries:
-        \(clip(joined, chunkChars))
-        """
-        let exec = try await ask(finalPrompt, maxTokens: options.finalMaxTokens)
-        return Result(sections: out, executiveSummary: exec, keyFigures: keyFigures)
+        // Pevná šablona (SummaryBrief): teze, změny, tahouni, rizika, kapitál, výhled, pro DCF.
+        let finalPrompt = SummaryBrief.prompt(company: company, fiscalYear: keyFigures.fiscalYear,
+                                              language: options.language, keyFigures: keyFigures.table(),
+                                              sections: clip(joined, chunkChars))
+        var exec = try await ask(finalPrompt, maxTokens: options.finalMaxTokens)
+        if SummaryBrief.parse(exec) == nil {
+            // Malé modely šablonu občas nedodrží – jeden pokus s připomínkou, jinak se vezme text, jak je.
+            let retry = try await ask(finalPrompt + "\n\nIMPORTANT: answer ONLY with the template above – " +
+                                      "the labels THESIS:, CHANGES:, DRIVERS:, RISKS:, CAPITAL:, OUTLOOK:, VALUATION: each on its own line.",
+                                      maxTokens: options.finalMaxTokens)
+            if SummaryBrief.parse(retry) != nil { exec = retry }
+        }
+        return Result(sections: out, executiveSummary: exec, keyFigures: keyFigures, language: options.language)
     }
 
     /// Hierarchical reduce so it also fits small contexts.

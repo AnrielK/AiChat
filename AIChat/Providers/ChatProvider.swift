@@ -117,6 +117,18 @@ enum HTTPStreaming {
         throw ProviderError.http(status: http.statusCode, message: message)
     }
 
+    /// Chyba, kterou má smysl zopakovat: přetížený nebo dočasně nedostupný server
+    /// (500/502/503/504, Claude 529) a přerušené spojení. 429 sem nepatří – tam rozhoduje limit tarifu.
+    static func isTransient(_ error: Error) -> Bool {
+        if case .http(let status, _)? = error as? ProviderError {
+            return [500, 502, 503, 504, 529].contains(status)
+        }
+        if let urlError = error as? URLError {
+            return [.networkConnectionLost, .timedOut, .cannotConnectToHost].contains(urlError.code)
+        }
+        return false
+    }
+
     /// Obyčejný GET/POST s JSON odpovědí.
     static func json(for request: URLRequest) async throws -> [String: Any] {
         let (data, response) = try await URLSession.shared.data(for: request)

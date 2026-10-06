@@ -96,12 +96,23 @@ final class CloudLimitsStore {
         switch provider {
         case .claude: info = try? await ClaudeProvider.modelInfo(model: model, apiKey: apiKey)
         case .gemini: info = try? await GeminiProvider.modelInfo(model: model, apiKey: apiKey)
+        case .openai: info = try? await OpenAIProvider.modelInfo(model: model, apiKey: apiKey)
+        case .nvidia: info = try? await NvidiaProvider.modelInfo(model: model, apiKey: apiKey)
         default: info = nil
         }
         guard let info, info.window != nil || info.maxOutput != nil else { return }
         modify(provider, model) { limits in
             limits.contextWindow = info.window ?? limits.contextWindow
             limits.maxOutputTokens = info.maxOutput ?? limits.maxOutputTokens
+            limits.modelInfoDate = .now
+        }
+    }
+
+    /// Okno zjištěné jinak než z Models API (NVIDIA: z chyby „maximum context length“).
+    func recordModelInfo(provider: AIProvider, model: String, window: Int?, maxOutput: Int? = nil) {
+        modify(provider, model) { limits in
+            if let window, window > 0 { limits.contextWindow = window }
+            if let maxOutput, maxOutput > 0 { limits.maxOutputTokens = maxOutput }
             limits.modelInfoDate = .now
         }
     }
@@ -133,17 +144,31 @@ final class CloudLimitsStore {
         tierInputPerMinute: Int? = nil
     ) -> CloudRequestPlan {
         let known = self.limits(for: provider, model: model)
-        let window = known.contextWindow ?? (provider == .claude ? 200_000 : 1_048_576)
-        let maxOutput = max(256, min(requestedMaxTokens, known.maxOutputTokens ?? requestedMaxTokens))
+        let fallbackWindow: Int = switch provider {
+        case .claude: 200_000
+        case .openai: OpenAIProvider.knownLimits(model: model).window ?? 128_000
+        // Katalog NVIDIA okno neposílá; 128k má většina modelů, menší okno se zjistí z chyby.
+        case .nvidia: 128_000
+        default: 1_048_576
+        }
+        let window = known.contextWindow ?? fallbackWindow
+        var maxOutput = max(256, min(requestedMaxTokens, known.maxOutputTokens ?? requestedMaxTokens))
+        let perMinuteCandidates = [tierInputPerMinute, known.inputTokensPerMinute].compactMap { $0 }.filter { $0 > 0 }
+        // OpenAI počítá do limitu za minutu prompt + max_output_tokens. Na free tieru (10k TPM
+        // u GPT-6 Sol) by 8k odpovědi nechalo na prompt jen pár set tokenů – odpověď max. na půl limitu.
+        if provider == .openai, adaptToTier, let perMinute = perMinuteCandidates.min() {
+            maxOutput = max(256, min(maxOutput, perMinute / 2))
+        }
 
-        var input = provider == .claude ? max(4_000, window - maxOutput) : window
+        // Claude, OpenAI i NVIDIA (vLLM) počítají do okna i odpověď, Gemini má limit vstupu zvlášť.
+        var input = provider == .gemini ? window : max(4_000, window - maxOutput)
         var limitedByTier = false
         // Vybraný tarif i hodnota zjištěná z API – platí nižší (API ví, co opravdu platí;
         // po přechodu na vyšší tarif se zjištěná hodnota obnoví z hlaviček / „Znovu zjistit limity“).
-        let perMinuteCandidates = [tierInputPerMinute, known.inputTokensPerMinute].compactMap { $0 }.filter { $0 > 0 }
         if adaptToTier, let perMinute = perMinuteCandidates.min() {
             // 10 % rezerva: odhad tokenů ze znaků není přesný.
-            let tierBudget = perMinute * 9 / 10
+            // OpenAI do limitu za minutu započítá i max_output_tokens požadavku.
+            let tierBudget = (provider == .openai ? perMinute - maxOutput : perMinute) * 9 / 10
             if tierBudget < input {
                 input = max(1_000, tierBudget)
                 limitedByTier = true
@@ -167,16 +192,17 @@ extension ChatTurn {
         _ history: [ChatTurn],
         tokenBudget: Int,
         systemPrompt: String,
-        charactersPerToken: Double = 2.5
+        charactersPerToken: Double = 2.5,
+        keepSeparate: (Attachment) -> Bool = { $0.sendsNatively }
     ) -> (turns: [ChatTurn], dropped: Bool) {
         // Originály stojí tokeny i bez textu: obrázek ~1 600, strana PDF ~2 000.
-        let nativeTokens = history.flatMap(\.attachments).filter(\.sendsNatively).reduce(0) { total, file in
+        let nativeTokens = history.flatMap(\.attachments).filter { keepSeparate($0) && $0.sendsNatively }.reduce(0) { total, file in
             total + (file.kind == .image ? 1_600 : 2_000 * (file.pageCount ?? 1))
         }
         // Raději méně znaků na token než překročit limit (čeština tokenizuje hůř než angličtina).
         let characterBudget = max(2_000, Int(Double(tokenBudget - nativeTokens) * charactersPerToken) - systemPrompt.count)
 
-        var turns = inliningAttachments(history, characterBudget: characterBudget, keepSeparate: \.sendsNatively)
+        var turns = inliningAttachments(history, characterBudget: characterBudget, keepSeparate: { keepSeparate($0) && $0.sendsNatively })
         var dropped = false
         while turns.count > 1, turns.reduce(0, { $0 + $1.text.count }) > characterBudget {
             turns.removeFirst(min(2, turns.count - 1))

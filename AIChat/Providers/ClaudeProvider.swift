@@ -158,6 +158,7 @@ struct ClaudeProvider: ChatProvider {
 
     /// Limity tarifu z hlaviček `anthropic-ratelimit-*` (za minutu, pro rodinu modelů).
     private static func recordTier(from response: HTTPURLResponse, model: String) async {
+        await RateLimitStatusStore.shared.record(provider: .claude, model: model, response: response)
         func value(_ name: String) -> Int? {
             response.value(forHTTPHeaderField: name).flatMap { Int($0.trimmingCharacters(in: .whitespaces)) }
         }

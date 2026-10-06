@@ -4,6 +4,8 @@ import Security
 enum KeychainAccount: String {
     case claude = "api.claude"
     case gemini = "api.gemini"
+    case openai = "api.openai"
+    case nvidia = "api.nvidia"
     case huggingFace = "hf.token"
     /// Refresh token Google OAuth (Google Sheets pro FinFill).
     case googleRefresh = "google.refresh"

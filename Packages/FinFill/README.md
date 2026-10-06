@@ -126,7 +126,7 @@ Stojí za zmínku: v CF je nová položka **Groq, Inc. (13 000)**, mapování ji
 - Čísla v souhrnu: model dostane tabulku `KeyFigures` spočítanou z XBRL a smí citovat jen ji.
 - `temperature 0.6` (greedy dekódování Qwen3.x distilace zacyklí), `/no_think` + odstranění `<think>`.
 - Jazyk: `Summarizer.Options.language` (`"English"` / `"Czech"`). U 4B modelu je angličtina výrazně lepší.
-- Výstup: markdown + list `Summary FY2026` v sešitu.
+- Výstup: markdown + list `Souhrn` – vždy první v sešitu, nový souhrn ho přepíše. Pevná šablona (`SummaryBrief`): teze, klíčová čísla z XBRL, co se změnilo, tahouni, rizika, kapitál, výhled, pro DCF; souhrny kapitol sbalené dole.
 
 Na Macu se dá kvalita souhrnu porovnat přes OpenAI-kompatibilní server:
 

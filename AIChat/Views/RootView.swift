@@ -55,6 +55,15 @@ struct RootView: View {
                     if settings.activeReasoningKey != nil {
                         Toggle("Přemýšlení", systemImage: "brain", isOn: $settings.activeReasoningEnabled)
                     }
+                    // Zbývající limity cloudové služby (z hlaviček poslední odpovědi).
+                    if settings.provider.isCloud,
+                       let limits = RateLimitStatusStore.shared.summary(
+                           provider: settings.provider,
+                           model: settings.cloudModel(for: settings.provider)) {
+                        Section {
+                            Label(limits, systemImage: "gauge.with.dots.needle.33percent")
+                        }
+                    }
                 }
                 .toolbar {
                     // V otevřené konverzaci šipka zpět na úvodní obrazovku (ta je zároveň nový chat).

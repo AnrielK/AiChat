@@ -41,6 +41,20 @@ final class TrainingSample {
     }
 }
 
+extension TrainingSample {
+    /// Vzorek z importu datasetu (`hf:<dataset>` / `file:<soubor>`), ne od učitele.
+    var isImported: Bool {
+        teacherModel.hasPrefix("hf:") || teacherModel.hasPrefix("file:")
+    }
+
+    /// Čitelný název zdroje pro menu a dialogy.
+    static func sourceLabel(_ source: String) -> String {
+        if source.hasPrefix("hf:") { return String(source.dropFirst(3)) }
+        if source.hasPrefix("file:") { return "soubor " + String(source.dropFirst(5)) }
+        return source
+    }
+}
+
 /// Kopie vzorku, která se dá poslat mimo hlavní vlákno. SwiftData modely
 /// `Sendable` nejsou, a trénink běží v actoru.
 struct TrainingSampleData: Sendable, Identifiable {

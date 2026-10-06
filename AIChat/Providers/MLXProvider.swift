@@ -89,6 +89,7 @@ actor MLXEngine {
     private var sessionTokens = 0
 
     func unload() {
+        MLXExpertStreaming.reset()
         dropSession()
         container = nil
         loadedPath = ""
@@ -118,7 +119,10 @@ actor MLXEngine {
         MemoryBudget.cap = max(0, settings.memoryCapMB) * 1_048_576
         // Znovu i tady: strop se dá v Parametrech změnit, aniž by se model přenačítal.
         Self.applyMemoryLimit()
-        let container = try await load(directory, experts: settings.expertsPerToken)
+        let container = try await load(
+            directory, experts: settings.expertsPerToken,
+            streamExperts: settings.mlxStreamExperts, expertCacheMB: settings.mlxExpertCacheMB,
+            expertPageCache: settings.mlxExpertPageCache)
         defer { Memory.clearCache() }
 
         // Kontext podle volné paměti (měřeno po načtení modelu) – dlouhý text by jinak appku shodil.
@@ -301,6 +305,9 @@ actor MLXEngine {
         let stops = stop.filter { !$0.isEmpty }
 
         do {
+            _ = MLXExpertStreaming.current?.takeStats()
+            MLXExpertStreaming.current?.prefetchEnabled = settings.mlxExpertPrefetch
+            MLXExpertStreaming.current?.overlapReads = settings.mlxExpertOverlap
             for try await generation in live.streamDetails(to: fresh.map(Self.message)) {
                 if Task.isCancelled { break }
                 switch generation {
@@ -341,6 +348,14 @@ actor MLXEngine {
                 case .info(let info):
                     promptCount = info.promptTokenCount
                     outputCount = info.generationTokenCount
+                    let generated = info.generationTokenCount
+                    let seconds = info.generateTime
+                    let promptSeconds = info.promptTime
+                    let speed = seconds > 0 ? Double(generated) / seconds : 0
+                    Self.log.notice("""
+                        prefill \(info.promptTokenCount) tokenů za \(String(format: "%.1f", promptSeconds)) s · \
+                        generování \(generated) tokenů za \(String(format: "%.1f", seconds)) s (\(String(format: "%.2f", speed)) tok/s)
+                        """)
                 default:
                     break
                 }
@@ -351,6 +366,21 @@ actor MLXEngine {
             throw error
         }
         handle(parser.flush())
+        if let stats = MLXExpertStreaming.current?.takeStats(), stats.requests > 0 {
+            let lookups = stats.hits + stats.misses
+            let hitRate = lookups > 0 ? Double(stats.hits) / Double(lookups) * 100 : 0
+            let tokens = max(1, outputCount)
+            let megabytes = stats.bytes / 1_048_576
+            let perToken = Double(stats.bytes) / Double(tokens) / 1_048_576
+            let readMs = stats.readSeconds * 1000
+            let prefetchNote = stats.prefetchedExperts > 0
+                ? " · předčteno \(stats.prefetchedExperts) expertů (\(stats.prefetchBytes / 1_048_576) MB za \(String(format: "%.0f", stats.prefetchSeconds * 1000)) ms na pozadí), použito \(stats.prefetchUseful) (\(String(format: "%.0f", Double(stats.prefetchUseful) / Double(stats.prefetchedExperts) * 100)) %), čekání na ně \(String(format: "%.0f", stats.waitSeconds * 1000)) ms"
+                : ""
+            Self.log.notice("""
+                MoE z úložiště: zásah slotů \(String(format: "%.1f", hitRate)) % (\(stats.hits) z \(lookups)) · \
+                čteno ve výpočtu \(megabytes) MB (\(String(format: "%.0f", perToken)) MB/token) za \(String(format: "%.0f", readMs)) ms\(prefetchNote)
+                """)
+        }
 
         // Odpověď je teď součástí KV cache, takže do seznamu patří taky. Ukládá se text
         // bez think bloku – přesně tak, jak ho má appka v historii, aby porovnání sedělo.
@@ -480,7 +510,10 @@ actor MLXEngine {
     }
 
     /// `experts` = kolik expertů na token u MoE (0 = podle modelu), viz `MLXExperts`.
-    private func load(_ directory: URL, experts: Int) async throws -> MLXLMCommon.ModelContainer {
+    private func load(
+        _ directory: URL, experts: Int, streamExperts: Bool = false, expertCacheMB: Int = 0,
+        expertPageCache: Bool = false
+    ) async throws -> MLXLMCommon.ModelContainer {
         // Natrénovaný adaptér je součástí identity načteného modelu: po jeho zapnutí
         // nebo vypnutí se musí model načíst znovu, jinak by se dál generovalo
         // z toho, co je zrovna v paměti.
@@ -488,6 +521,7 @@ actor MLXEngine {
         let path = directory.path(percentEncoded: false)
             + (adapterDirectory.map { "|" + $0.path(percentEncoded: false) } ?? "")
             + (experts > 0 ? "|k\(experts)" : "")
+            + (streamExperts ? "|stream\(expertCacheMB)\(expertPageCache ? "pc" : "")" : "")
         if let container, path == loadedPath { return container }
         unload()
 
@@ -497,8 +531,21 @@ actor MLXEngine {
         // Strop na váhy. Kontext se dá zkrátit, váhy ne – jakmile je model načtený,
         // nemá co uhnout. Když se pod strop nevejdou, je správná odpověď odmítnout
         // načtení, ne ho spustit a pak zjistit, že strop neplatí.
+        // Experti MoE z úložiště (experiment): v paměti je jen hustá část a cache expertů.
+        var streamPlan: MLXExpertStore.Plan?
+        if streamExperts {
+            if let type = MLXExpertStreaming.modelType(directory), MLXExpertStreaming.supportedTypes.contains(type) {
+                streamPlan = MLXExpertStore.plan(
+                    directory: directory, cacheBytes: max(512, expertCacheMB) * 1_048_576, pageCache: expertPageCache)
+                if streamPlan == nil {
+                    Self.log.notice("MoE z úložiště: formát vah nepodporovaný (čeká se MLX checkpoint se switch_mlp, kvantizace affine) – načítám celý model")
+                }
+            } else {
+                Self.log.notice("MoE z úložiště: architektura \(MLXExpertStreaming.modelType(directory) ?? "?") zatím není podporovaná – načítám celý model")
+            }
+        }
         if MemoryBudget.cap > 0 {
-            let weights = Self.directorySize(directory)
+            let weights = streamPlan?.residentBytes ?? Self.directorySize(directory)
             let needed = weights + MemoryBudget.footprint + MemoryBudget.reserve
             if weights > 0, needed > MemoryBudget.cap {
                 let format: (Int) -> String = {
@@ -526,6 +573,7 @@ actor MLXEngine {
         }
         // Architektury, které mlx-swift-lm zatím nezná (Spark-X2.5).
         await MLXSpark25.register()
+        await MLXExpertStreaming.prepare(plan: streamPlan, expertsPerToken: experts)
         let loaded: MLXLMCommon.ModelContainer
         do {
             loaded = try await LLMModelFactory.shared.loadContainer(

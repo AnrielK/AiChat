@@ -83,8 +83,9 @@ public struct FinFillView: View {
     }
 
     private var optionsSection: some View {
-        Section("Možnosti") {
+        Section {
             Toggle("Přepsat neprázdné buňky", isOn: $model.overwrite)
+            Toggle("Nový sešit: nejnovější rok vlevo", isOn: $model.newestFirst)
             Toggle("List Segments (segmenty, trhy, regiony + meziroční změna)", isOn: $model.segments)
             Toggle("Souhrn modelem", isOn: $model.summarize)
                 .disabled(!model.hasEngine)
@@ -93,6 +94,10 @@ public struct FinFillView: View {
                 Text("Čeština").tag("Czech")
             }
             .disabled(!model.summarize)
+        } header: {
+            Text("Možnosti")
+        } footer: {
+            Text("Souhrn se zapíše na list „Souhrn“, který je vždy první v sešitu – nový souhrn ho přepíše. Pořadí let v existujícím sešitu se pozná z hlavičky; nový rok se doplní na správnou stranu.")
         }
     }
 
@@ -388,6 +393,10 @@ final class FinFillViewModel {
     var segments = UserDefaults.standard.object(forKey: "finfill.segments") as? Bool ?? true {
         didSet { UserDefaults.standard.set(segments, forKey: "finfill.segments") }
     }
+    /// Nový sešit: výkazy a Segments od aktuálního roku (vlevo) ke starším (doprava).
+    var newestFirst = UserDefaults.standard.object(forKey: "finfill.newestFirst") as? Bool ?? true {
+        didSet { UserDefaults.standard.set(newestFirst, forKey: "finfill.newestFirst") }
+    }
 
     var isRunning = false
     var status = ""
@@ -437,6 +446,7 @@ final class FinFillViewModel {
         c.dryRun = dryRun
         c.summaryOptions.language = language
         c.segments = segments
+        c.newestFirst = newestFirst
         return c
     }
 

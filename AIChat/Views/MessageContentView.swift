@@ -522,7 +522,67 @@ struct MarkdownTable: Equatable {
     func alignment(column: Int) -> Alignment {
         let stated = column < alignments.count ? alignments[column] : .automatic
         guard stated == .automatic else { return stated }
-        return isNumeric(column: column) ? .trailing : .leading
+        return isNumeric(column: column) || cellUnit(column: column) != nil ? .trailing : .leading
+    }
+
+    /// Tabulka pro zobrazení. Jednotka, kterou model zopakoval v každé buňce sloupce
+    /// („63,338 mld. USD“), se z buněk odstraní a přesune do hlavičky sloupce; pak platí
+    /// stejné pravidlo jako pro jednotku v hlavičce – společná se ukáže jednou nad tabulkou.
+    /// Kopírování a CSV berou původní buňky.
+    var display: (header: [String], rows: [[String]], unit: String?) {
+        var header = self.header
+        var rows = self.rows
+        for column in header.indices {
+            guard let unit = cellUnit(column: column) else { continue }
+            let stated = Self.splitUnit(header[column]).unit
+            // Hlavička už má jinou jednotku („Tržby (mil. USD)“ a v buňkách „%“) – nic neměnit.
+            if let stated, stated.lowercased() != unit.lowercased() { continue }
+            if stated == nil { header[column] += " (\(unit))" }
+            for row in rows.indices where column < rows[row].count {
+                rows[row][column] = Self.strip(unit, from: rows[row][column])
+            }
+        }
+        let hoisted = MarkdownTable(header: header, alignments: alignments, rows: rows).displayHeader
+        return (hoisted.header, rows, hoisted.unit)
+    }
+
+    /// Jednotka na konci všech číselných buněk sloupce (prázdné a „–“ se nepočítají).
+    /// nil = sloupec není číselný, nebo buňky jednotku nemají, nebo se liší.
+    func cellUnit(column: Int) -> String? {
+        let values = rows.compactMap { column < $0.count ? Self.plain($0[column]).trimmingCharacters(in: .whitespaces) : nil }
+            .filter { !$0.isEmpty && !["–", "-", "—", "n/a", "N/A"].contains($0) }
+        guard !values.isEmpty else { return nil }
+        var found: String?
+        for value in values {
+            guard let unit = Self.splitCellUnit(value) else { return nil }
+            if let found, found.lowercased() != unit.lowercased() { return nil }
+            found = found ?? unit
+        }
+        return found
+    }
+
+    /// „63,338 mld. USD“ → „mld. USD“, „3,7 %“ → „%“. Jen číslo (i se znaménkem, závorkou
+    /// nebo měnovým symbolem na začátku) následované jednotkou, nic dalšího.
+    static func splitCellUnit(_ value: String) -> String? {
+        let pattern = #"^[+\-−–(]?[$€£]?\s?[\d\s\u00A0.,']*\d\)?\s*([^\d\s()][^\d()]{0,15})$"#
+        guard let regex = try? NSRegularExpression(pattern: pattern),
+              let match = regex.firstMatch(in: value, range: NSRange(value.startIndex..., in: value)),
+              let range = Range(match.range(at: 1), in: value)
+        else { return nil }
+        // Nezlomitelná mezera („mld.\u{00A0}USD“) ať se počítá jako stejná jednotka.
+        let unit = value[range].replacingOccurrences(of: "\u{00A0}", with: " ").trimmingCharacters(in: .whitespaces)
+        return isUnit(unit) ? unit : nil
+    }
+
+    /// Odstraní jednotku z konce buňky i s mezerou před ní; markdown kolem (`**…**`) zůstane.
+    static func strip(_ unit: String, from cell: String) -> String {
+        let cell = cell.replacingOccurrences(of: "\u{00A0}", with: " ")
+        guard let range = cell.range(of: unit, options: [.backwards, .caseInsensitive]) else { return cell }
+        var start = range.lowerBound
+        while start > cell.startIndex, cell[cell.index(before: start)].isWhitespace {
+            start = cell.index(before: start)
+        }
+        return String(cell[..<start]) + cell[range.upperBound...]
     }
 
     /// Hlavička a jednotka pro zobrazení. Jednotka v závorce, kterou sdílí víc sloupců
@@ -605,7 +665,7 @@ struct TableBlockView: View {
 
     var body: some View {
         let widths = columnWidths()
-        let display = table.displayHeader
+        let display = table.display
         VStack(alignment: .leading, spacing: 10) {
             HStack {
                 VStack(alignment: .leading, spacing: 2) {
@@ -667,7 +727,7 @@ struct TableBlockView: View {
                     ForEach(table.rows.indices, id: \.self) { row in
                         GridRow {
                             ForEach(table.header.indices, id: \.self) { column in
-                                cell(table.rows[row][column], column: column, width: widths[column])
+                                cell(display.rows[row][column], column: column, width: widths[column])
                                     .font(.subheadline)
                                     .monospacedDigit()
                             }
@@ -705,10 +765,11 @@ struct TableBlockView: View {
     private func columnWidths() -> [CGFloat] {
         let body = UIFont.preferredFont(forTextStyle: .subheadline)
         let bold = UIFont.systemFont(ofSize: body.pointSize, weight: .semibold)
-        let header = table.displayHeader.header
+        let display = table.display
+        let header = display.header
         return table.header.indices.map { column in
             var widest = Self.measure(MarkdownTable.plain(header[column]), font: bold)
-            for row in table.rows {
+            for row in display.rows {
                 widest = max(widest, Self.measure(MarkdownTable.plain(row[column]), font: body))
             }
             return min(Self.maxColumnWidth, max(Self.minColumnWidth, ceil(widest) + 2))

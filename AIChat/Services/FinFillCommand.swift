@@ -25,6 +25,8 @@ struct FinFillCommand: Sendable, Equatable {
     let fiscalYear: Int?
     /// Cílový sešit zadaný v příkazu (ID nebo URL); nil = vybraný na obrazovce 10-K → Sheets.
     var sheet: String? = nil
+    /// `new … přesto`: založit nový sešit, i když na Disku už sešit s tickerem je.
+    var force = false
 
     static func parse(_ text: String) -> FinFillCommand? {
         let words = text.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -62,7 +64,9 @@ struct FinFillCommand: Sendable, Equatable {
             sheet = rest[i + 1]
         }
 
-        return FinFillCommand(action: ticker == nil ? .help : action, ticker: ticker, peers: peers, fiscalYear: fy, sheet: sheet)
+        let force = lower.contains { ["přesto", "presto", "--force", "force", "znovu"].contains($0) }
+        return FinFillCommand(action: ticker == nil ? .help : action, ticker: ticker, peers: peers, fiscalYear: fy,
+                              sheet: sheet, force: force)
     }
 
     /// Text příkazu (pro odkazy v nabídce sešitů).
@@ -79,6 +83,7 @@ struct FinFillCommand: Sendable, Equatable {
         if case .run(write: true) = action { parts.append("zapsat") }
         if let fiscalYear { parts.append("fy\(fiscalYear)") }
         if let sheet { parts += ["sešit", sheet] }
+        if force { parts.append("přesto") }
         return parts.joined(separator: " ")
     }
 
@@ -101,6 +106,7 @@ struct FinFillCommand: Sendable, Equatable {
 
     - `finfill new AMD` – nový sešit v Google Sheets (výkazy 9 let, DCF, WACC) + Citlivost, Comps a Kvartály
     - `finfill new AMD peers NVDA,INTC` – totéž s peery pro Comps (pro AMD se zapamatují)
+    - když už na Disku sešit s AMD v názvu je, nabídne se aktualizace existujícího; `finfill new AMD přesto` založí nový
     - `finfill analyze NVDA` – jen Citlivost / Comps / Kvartály do vybraného sešitu
     - `finfill run NVDA` – náhled zápisu posledního 10-K do vybraného sešitu, `finfill run NVDA zapsat` zapíše
     - `fy2025` kdekoli v příkazu = konkrétní fiskální rok, `sešit <ID nebo URL>` = kam zapsat
@@ -222,6 +228,13 @@ struct FinFillCommandProvider: ChatProvider {
                 return
             }
         }
+        // Nový sešit: když už na Disku sešit s tickerem v názvu je, nabídnout aktualizaci existujícího.
+        if command.action == .new, !command.force,
+           let existing = try? await GoogleDriveClient(tokens: GoogleTokenProvider()).spreadsheets(search: ticker, limit: 50),
+           !SpreadsheetMatch.candidates(existing, ticker: ticker).isEmpty {
+            out.yield(.text(Self.offerExisting(SpreadsheetMatch.candidates(existing, ticker: ticker), for: command, ticker: ticker)))
+            return
+        }
         PendingChoice.clear()
 
         var md = ""
@@ -298,6 +311,29 @@ struct FinFillCommandProvider: ChatProvider {
         UserDefaults.standard.set(ticker, forKey: "finfill.ticker")
         UserDefaults.standard.set(id, forKey: "finfill.sheet")
         UserDefaults.standard.set(name, forKey: "finfill.sheetName")
+    }
+
+    /// `finfill new` a sešit s tickerem už existuje: aktualizovat ho (zápis posledního 10-K + analýzy),
+    /// nebo přesto založit nový.
+    static func offerExisting(_ files: [GoogleDriveClient.File], for command: FinFillCommand, ticker: String) -> String {
+        let rel = RelativeDateTimeFormatter()
+        rel.locale = Locale(identifier: "cs_CZ")
+        var choices: [(title: String, command: String)] = files.map { f in
+            let when = f.modified.map { " · upraveno " + rel.localizedString(for: $0, relativeTo: .now) } ?? ""
+            let update = FinFillCommand(action: .run(write: true), ticker: ticker, peers: nil,
+                                        fiscalYear: command.fiscalYear, sheet: f.id)
+            return ("Aktualizovat „\(f.name)“" + when, update.text)
+        }
+        var fresh = command
+        fresh.force = true
+        choices.append(("Přesto založit nový sešit pro \(ticker)", fresh.text))
+
+        var md = "Na Disku už \(files.count == 1 ? "je sešit" : "jsou sešity") s \(ticker) v názvu. Co udělat?\n\n"
+        for (i, c) in choices.enumerated() { md += "\(i + 1). " + FinFillCommand.link(c.title, c.command) + "\n" }
+        md += "\n_Aktualizace zapíše poslední 10-K do existujícího sešitu (vyplněné buňky nepřepisuje) a obnoví Citlivost, Comps a Kvartály._\n"
+        md += "\nKlepni na možnost, nebo napiš její číslo."
+        PendingChoice.save(choices.map(\.command))
+        return md
     }
 
     /// Nabídka, kam zapsat: soubory z Disku s tickerem v názvu, nový sešit, případně vybraný i tak.

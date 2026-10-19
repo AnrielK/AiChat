@@ -30,6 +30,9 @@ počítané kódem z SEC a zapsané jako vzorce. V obrazovce 10-K → Sheets nov
   a „Přesto zapsat“. Vybírá se klepnutím na odkaz nebo napsáním čísla (15 minut); vybraný sešit se pak
   nastaví i na obrazovce 10-K → Sheets. Cíl jde zadat i rovnou: `finfill analyze NVDA sešit <ID|URL>`.
   Na obrazovce 10-K → Sheets se při nesouladu ukáže varování s výběrem sešitů vyfiltrovaným na ticker.
+- **`finfill new` a existující sešit**: když už na Disku je sešit s tickerem v názvu, nový se nezaloží
+  a nabídne se „Aktualizovat …“ (zápis posledního 10-K do existujícího sešitu, vyplněné buňky se
+  nepřepisují, obnoví se Citlivost, Comps a Kvartály) nebo „Přesto založit nový“ (`finfill new AMD přesto`).
 - CLI s nastavením: stačí `finfill new AMD` / `finfill run NVDA --write` / `finfill analyze NVDA`. User-Agent,
   token (nebo `token_command`), sešit, model, jazyk, kvartály a peery pro každý ticker se ukládají přes
   `finfill config` do `~/.config/finfill/config.json`; přepínače mají přednost.

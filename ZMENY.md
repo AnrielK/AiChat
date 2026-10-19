@@ -23,6 +23,8 @@ počítané kódem z SEC a zapsané jako vzorce. V obrazovce 10-K → Sheets nov
   a souhrn. Dál `finfill analyze NVDA`, `finfill run NVDA` (náhled) / `finfill run NVDA zapsat`,
   `peers AMD,INTC` a `fy2025` kdekoli v příkazu. Nastavení bere z obrazovky 10-K → Sheets (User-Agent,
   vybraný sešit, přepínače, peery) a přihlášení ke Google; nový sešit se tam rovnou vybere.
+- **Kontrola tickeru sešitu**: zápis i analýzy nejdřív porovnají ticker v DCF!C4 s firmou – NVDA se už
+  nezapíše do „AMD Valuation“. Chat pak nabídne `finfill new NVDA`; vlastní sešity bez DCF!C4 se nekontrolují.
 - CLI s nastavením: stačí `finfill new AMD` / `finfill run NVDA --write` / `finfill analyze NVDA`. User-Agent,
   token (nebo `token_command`), sešit, model, jazyk, kvartály a peery pro každý ticker se ukládají přes
   `finfill config` do `~/.config/finfill/config.json`; přepínače mají přednost.

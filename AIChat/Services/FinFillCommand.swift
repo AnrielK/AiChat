@@ -147,54 +147,60 @@ struct FinFillCommandProvider: ChatProvider {
         }
 
         var md = ""
-        switch command.action {
-        case .help:
-            md = FinFillCommand.help
+        do {
+            switch command.action {
+            case .help:
+                md = FinFillCommand.help
 
-        case .new:
-            out.yield(.status("FinFill: nový sešit pro \(ticker)…\n"))
-            let pipeline = FinFillPipeline(config: cfg, tokens: GoogleTokenProvider(), engine: engine)
-            let w = try await pipeline.createWorkbook(template: try SpreadsheetTemplate.bundledUniversal(), log: log)
-            // Nový sešit je od teď vybraný i na obrazovce 10-K → Sheets.
-            UserDefaults.standard.set(ticker, forKey: "finfill.ticker")
-            UserDefaults.standard.set(w.spreadsheetID, forKey: "finfill.sheet")
-            UserDefaults.standard.set(w.title, forKey: "finfill.sheetName")
-            md += "**Sešit:** [\(w.title)](\(w.url.absoluteString))\n\n"
-            let ok = w.years.filter { $0.failed == 0 }
-            md += "Vyplněno \(w.written) buněk za \(ok.count) let (FY\(ok.map(\.fiscalYear).min().map(String.init) ?? "–")–FY\(ok.map(\.fiscalYear).max().map(String.init) ?? "–"))"
-            let skipped = w.years.filter { $0.failed > 0 }
-            if !skipped.isEmpty { md += ", vynecháno: " + skipped.map { "FY\($0.fiscalYear)" }.joined(separator: ", ") }
-            md += ".\n\n"
-            md += Self.analysisMarkdown(w.analysis)
-            if let s = w.summary { md += "\n" + s.markdown(company: w.filing.company) }
+            case .new:
+                out.yield(.status("FinFill: nový sešit pro \(ticker)…\n"))
+                let pipeline = FinFillPipeline(config: cfg, tokens: GoogleTokenProvider(), engine: engine)
+                let w = try await pipeline.createWorkbook(template: try SpreadsheetTemplate.bundledUniversal(), log: log)
+                // Nový sešit je od teď vybraný i na obrazovce 10-K → Sheets.
+                UserDefaults.standard.set(ticker, forKey: "finfill.ticker")
+                UserDefaults.standard.set(w.spreadsheetID, forKey: "finfill.sheet")
+                UserDefaults.standard.set(w.title, forKey: "finfill.sheetName")
+                md += "**Sešit:** [\(w.title)](\(w.url.absoluteString))\n\n"
+                let ok = w.years.filter { $0.failed == 0 }
+                md += "Vyplněno \(w.written) buněk za \(ok.count) let (FY\(ok.map(\.fiscalYear).min().map(String.init) ?? "–")–FY\(ok.map(\.fiscalYear).max().map(String.init) ?? "–"))"
+                let skipped = w.years.filter { $0.failed > 0 }
+                if !skipped.isEmpty { md += ", vynecháno: " + skipped.map { "FY\($0.fiscalYear)" }.joined(separator: ", ") }
+                md += ".\n\n"
+                md += Self.analysisMarkdown(w.analysis)
+                if let s = w.summary { md += "\n" + s.markdown(company: w.filing.company) }
 
-        case .analyze:
-            guard !cfg.spreadsheet.isEmpty else { md = Self.noSheet(ticker); break }
-            out.yield(.status("FinFill: analýzy pro \(ticker) do „\(stored.spreadsheetName ?? cfg.spreadsheet)“…\n"))
-            let pipeline = FinFillPipeline(config: cfg, tokens: GoogleTokenProvider(), engine: engine)
-            let (_, a) = try await pipeline.analyzeOnly(log: log)
-            md += "**Sešit:** \(Self.sheetLink(stored, cfg.spreadsheet))\n\n" + Self.analysisMarkdown(a)
+            case .analyze:
+                guard !cfg.spreadsheet.isEmpty else { md = Self.noSheet(ticker); break }
+                out.yield(.status("FinFill: analýzy pro \(ticker) do „\(stored.spreadsheetName ?? cfg.spreadsheet)“…\n"))
+                let pipeline = FinFillPipeline(config: cfg, tokens: GoogleTokenProvider(), engine: engine)
+                let (_, a) = try await pipeline.analyzeOnly(log: log)
+                md += "**Sešit:** \(Self.sheetLink(stored, cfg.spreadsheet))\n\n" + Self.analysisMarkdown(a)
 
-        case let .run(write):
-            guard !cfg.spreadsheet.isEmpty else { md = Self.noSheet(ticker); break }
-            cfg.dryRun = !write
-            out.yield(.status("FinFill: \(write ? "zápis" : "náhled") \(ticker) do „\(stored.spreadsheetName ?? cfg.spreadsheet)“…\n"))
-            let pipeline = FinFillPipeline(config: cfg, tokens: GoogleTokenProvider(), engine: write ? engine : nil)
-            do {
-                let r = try await pipeline.run(log: log)
-                md += "**Sešit:** \(Self.sheetLink(stored, cfg.spreadsheet)) · FY\(r.filing.period.fiscalYear) · \(r.filing.company)\n\n"
-                let failed = r.checks.filter { !$0.passed }
-                md += failed.isEmpty ? "✓ Kontroly součtů prošly.\n\n"
-                    : "✗ Nesedí: " + failed.map(\.label).joined(separator: ", ") + " – zápis je zablokovaný.\n\n"
-                let toWrite = r.plan.filter { $0.action == .write }.count
-                md += write ? "Zapsáno \(r.written) buněk.\n\n"
-                    : "Náhled: \(toWrite) buněk k zápisu. Zapíšeš příkazem `finfill run \(ticker) zapsat`.\n\n"
-                md += Self.analysisMarkdown(r.analysis)
-                if let s = r.summary { md += "\n" + s.markdown(company: r.filing.company) }
-            } catch let PipelineError.checksFailed(checks) {
-                md = "✗ Kontroly součtů nesedí (" + checks.filter { !$0.passed }.map(\.label).joined(separator: ", ")
-                    + "), nic se nezapsalo. Podrobnosti ukáže náhled na obrazovce 10-K → Sheets."
+            case let .run(write):
+                guard !cfg.spreadsheet.isEmpty else { md = Self.noSheet(ticker); break }
+                cfg.dryRun = !write
+                out.yield(.status("FinFill: \(write ? "zápis" : "náhled") \(ticker) do „\(stored.spreadsheetName ?? cfg.spreadsheet)“…\n"))
+                let pipeline = FinFillPipeline(config: cfg, tokens: GoogleTokenProvider(), engine: write ? engine : nil)
+                do {
+                    let r = try await pipeline.run(log: log)
+                    md += "**Sešit:** \(Self.sheetLink(stored, cfg.spreadsheet)) · FY\(r.filing.period.fiscalYear) · \(r.filing.company)\n\n"
+                    let failed = r.checks.filter { !$0.passed }
+                    md += failed.isEmpty ? "✓ Kontroly součtů prošly.\n\n"
+                        : "✗ Nesedí: " + failed.map(\.label).joined(separator: ", ") + " – zápis je zablokovaný.\n\n"
+                    let toWrite = r.plan.filter { $0.action == .write }.count
+                    md += write ? "Zapsáno \(r.written) buněk.\n\n"
+                        : "Náhled: \(toWrite) buněk k zápisu. Zapíšeš příkazem `finfill run \(ticker) zapsat`.\n\n"
+                    md += Self.analysisMarkdown(r.analysis)
+                    if let s = r.summary { md += "\n" + s.markdown(company: r.filing.company) }
+                } catch let PipelineError.checksFailed(checks) {
+                    md = "✗ Kontroly součtů nesedí (" + checks.filter { !$0.passed }.map(\.label).joined(separator: ", ")
+                        + "), nic se nezapsalo. Podrobnosti ukáže náhled na obrazovce 10-K → Sheets."
+                }
             }
+        } catch let AnalysisError.tickerMismatch(workbook, requested) {
+            md = "Vybraný sešit **\(stored.spreadsheetName ?? cfg.spreadsheet)** patří k **\(workbook)**, ne k \(requested), "
+                + "takže jsem do něj nic nezapsal.\n\n- `finfill new \(requested)` založí nový sešit pro \(requested)\n"
+                + "- nebo vyber sešit pro \(requested) v *Nastavení › 10-K → Sheets* a zopakuj příkaz"
         }
         out.yield(.text(md))
     }

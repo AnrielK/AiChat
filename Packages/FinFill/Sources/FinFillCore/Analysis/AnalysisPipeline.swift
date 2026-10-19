@@ -150,10 +150,37 @@ extension FinFillPipeline {
     /// Jen analýzy do vybraného sešitu (bez zápisu výkazů) – např. po novém 10-Q nebo s jinými peery.
     public func analyzeOnly(filing prepared: PreparedFiling? = nil,
                             log: @escaping @Sendable (Event) -> Void = { _ in }) async throws -> (filing: PreparedFiling, analysis: AnalysisReport) {
+        let sheets = GoogleSheetsClient(spreadsheetID: GoogleSheetsClient.spreadsheetID(from: config.spreadsheet), tokens: tokens)
+        try await checkWorkbookTicker(sheets: sheets)
         let filing: PreparedFiling
         if let prepared { filing = prepared } else { filing = try await fetchFiling(log: log) }
-        let sheets = GoogleSheetsClient(spreadsheetID: GoogleSheetsClient.spreadsheetID(from: config.spreadsheet), tokens: tokens)
         return (filing, await runAnalyses(filing: filing, sheets: sheets, log: log))
+    }
+
+    /// Ticker sešitu ze šablony (DCF!C4). nil = sešit DCF nemá nebo je C4 prázdné (vlastní sešit).
+    public func workbookTicker(sheets: GoogleSheetsClient) async -> String? {
+        guard let titles = try? await sheets.sheetTitles(), titles.contains(DCFLayout.sheet),
+              let v = try? await sheets.batchGet(["\(A1.quote(DCFLayout.sheet))!C4"], render: .unformatted).first?.first?.first as? String
+        else { return nil }
+        let t = v.trimmingCharacters(in: .whitespaces).uppercased()
+        return t.isEmpty ? nil : t
+    }
+
+    /// Nedovolí zapsat jinou firmu do sešitu ze šablony (NVDA do „AMD Valuation“).
+    func checkWorkbookTicker(sheets: GoogleSheetsClient) async throws {
+        guard let t = await workbookTicker(sheets: sheets) else { return }
+        guard Self.sameTicker(t, config.ticker) else {
+            throw AnalysisError.tickerMismatch(workbook: t, requested: config.ticker.uppercased())
+        }
+    }
+
+    /// „BRK.B“ = „BRK-B“ = „brk.b“; burzovní předpona („NASDAQ:NVDA“) se ignoruje.
+    static func sameTicker(_ a: String, _ b: String) -> Bool {
+        func norm(_ s: String) -> String {
+            let t = s.split(separator: ":").last.map(String.init) ?? s
+            return t.uppercased().replacingOccurrences(of: "-", with: ".").trimmingCharacters(in: .whitespaces)
+        }
+        return norm(a) == norm(b)
     }
 
     /// DCF!A1:M60 – po vytvoření sešitu GOOGLEFINANCE chvíli načítá (WACC v chybě), proto až 3 pokusy.
@@ -194,6 +221,16 @@ extension FinFillPipeline {
             seen.insert(t); out.append(t)
         }
         return Array(out.prefix(12))
+    }
+}
+
+public enum AnalysisError: Error, LocalizedError, Equatable {
+    case tickerMismatch(workbook: String, requested: String)
+    public var errorDescription: String? {
+        switch self {
+        case let .tickerMismatch(w, r):
+            return "Vybraný sešit patří k \(w) (DCF!C4), ne k \(r). Nic se nezapsalo – vyber sešit pro \(r), nebo založ nový."
+        }
     }
 }
 

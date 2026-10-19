@@ -174,6 +174,14 @@ final class QuarterHistoryTests: XCTestCase {
         XCTAssertTrue(review.markdown().contains("## Výsledky"))
     }
 
+    func testTickerMatch() {
+        XCTAssertTrue(FinFillPipeline.sameTicker("NVDA", "nvda"))
+        XCTAssertTrue(FinFillPipeline.sameTicker("NASDAQ:NVDA", "NVDA"))
+        XCTAssertTrue(FinFillPipeline.sameTicker("BRK-B", "brk.b"))
+        XCTAssertFalse(FinFillPipeline.sameTicker("AMD", "NVDA"))
+        XCTAssertEqual(AnalysisError.tickerMismatch(workbook: "AMD", requested: "NVDA").errorDescription?.hasPrefix("Vybraný sešit patří k AMD"), true)
+    }
+
     func testPeerNormalization() {
         XCTAssertEqual(FinFillPipeline.normalizedPeers(["amd, AVGO;intc  nvda", "AMD"], excluding: "NVDA"), ["AMD", "AVGO", "INTC"])
     }

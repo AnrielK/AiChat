@@ -136,6 +136,29 @@ mlx_lm.server --model SiddhJagani/Qwen3.8-4B-mlx-4Bit --port 8080
 swift run finfill local --html nvda-20260125.htm --llm http://localhost:8080/v1 --model default --ctx 8192
 ```
 
+## CLI s nastavením
+
+Jednou nastavit, pak stačí ticker:
+
+```bash
+finfill config set ua "Jméno email@x.cz"
+finfill config set token_command "gcloud auth print-access-token"   # nebo: config set token <token>
+finfill config set sheet <ID|URL>          # výchozí sešit pro run / analyze
+finfill config set llm http://localhost:8080/v1    # volitelně model pro souhrn
+finfill config set quarterly true
+finfill config peers AMD NVDA,AVGO,INTC    # peery pro Comps, pro každý ticker zvlášť
+
+finfill new AMD          # nový sešit + Citlivost, Comps, Kvartály
+finfill run NVDA --write
+finfill analyze NVDA
+finfill config           # výpis nastavení
+```
+
+Nastavení je v `~/.config/finfill/config.json` (jiná cesta: `FINFILL_CONFIG`). Pořadí: přepínač
+(`--ua`, `--token`, `--sheet`, `--llm`, `--model`, `--ctx`, `--language`, `--peers`, `--quarterly` /
+`--no-quarterly`, `--no-sensitivity`) > proměnná `FINFILL_<KLÍČ>` > soubor. `token_command` dá vždy
+čerstvý token (z OAuth Playground platí jen hodinu).
+
 ## Analýzy (Citlivost, Comps, Kvartály)
 
 Inspirované skilly `dcf-model`, `comps-analysis` a `earnings-analysis` z

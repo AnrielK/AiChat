@@ -18,6 +18,9 @@ počítané kódem z SEC a zapsané jako vzorce. V obrazovce 10-K → Sheets nov
 - Stahování: submissions i companyfacts se stahují jednou pro 10-K i 10-Q; do mapování výkazů jdou
   dál jen roční údaje.
 - CLI: `finfill analyze` (analýzy do sešitu) a `finfill quarters` (offline kvartály + LTM z companyfacts).
+- CLI s nastavením: stačí `finfill new AMD` / `finfill run NVDA --write` / `finfill analyze NVDA`. User-Agent,
+  token (nebo `token_command`), sešit, model, jazyk, kvartály a peery pro každý ticker se ukládají přes
+  `finfill config` do `~/.config/finfill/config.json`; přepínače mají přednost.
 - Testy: 11 nových (syntetická firma s 10-K a 10-Q), celkem 43.
 
 ---

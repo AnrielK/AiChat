@@ -190,28 +190,33 @@ final class ChatViewModel {
 
         let provider: any ChatProvider
         do {
-            let base = try settings.makeProvider(models: models, profile: profile)
+            // „finfill new AMD“ apod. – příkaz FinFillu, zpráva nejde modelu (viz FinFillCommand).
+            if let command = FinFillCommandProvider.wrapping(text: text, settings: settings, models: models) {
+                provider = command
+            } else {
+                let base = try settings.makeProvider(models: models, profile: profile)
 
-            // Hledání v historii běží nad vlastním kontextem stejného kontejneru,
-            // takže nesahá na ten, se kterým pracuje UI.
-            let search = conversationSearch ?? ConversationSearch(modelContainer: context.container)
-            conversationSearch = search
-            let excluded = conversation?.id
-            let lookup: HistoryLookup = { query in
-                await search.excerpts(for: query, excluding: excluded)
+                // Hledání v historii běží nad vlastním kontextem stejného kontejneru,
+                // takže nesahá na ten, se kterým pracuje UI.
+                let search = conversationSearch ?? ConversationSearch(modelContainer: context.container)
+                conversationSearch = search
+                let excluded = conversation?.id
+                let lookup: HistoryLookup = { query in
+                    await search.excerpts(for: query, excluding: excluded)
+                }
+
+                // Dlouhá příloha ke shrnutí se na lokálním modelu zpracuje po částech,
+                // dotaz do dlouhé přílohy se místo ořezání vyhledá.
+                // Pořadí: shrnutí celé přílohy, pak agentní smyčka (když je zapnutá),
+                // pak pevná pipeline. Agent se ptá sám, takže pevné hledání nepotřebuje.
+                provider = SummaryPipeline.wrapping(
+                    base, settings: settings, models: models, attachments: files, profile: profile
+                ) ?? AgentPipeline.wrapping(
+                    base, settings: settings, profile: profile
+                ) ?? RetrievalPipeline.wrapping(
+                    base, settings: settings, profile: profile, historySearch: lookup
+                ) ?? base
             }
-
-            // Dlouhá příloha ke shrnutí se na lokálním modelu zpracuje po částech,
-            // dotaz do dlouhé přílohy se místo ořezání vyhledá.
-            // Pořadí: shrnutí celé přílohy, pak agentní smyčka (když je zapnutá),
-            // pak pevná pipeline. Agent se ptá sám, takže pevné hledání nepotřebuje.
-            provider = SummaryPipeline.wrapping(
-                base, settings: settings, models: models, attachments: files, profile: profile
-            ) ?? AgentPipeline.wrapping(
-                base, settings: settings, profile: profile
-            ) ?? RetrievalPipeline.wrapping(
-                base, settings: settings, profile: profile, historySearch: lookup
-            ) ?? base
         } catch {
             showError(error.localizedDescription)
             return

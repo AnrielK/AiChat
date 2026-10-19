@@ -191,6 +191,7 @@ public struct FinFillPipeline: Sendable {
 
         // 2) Plan against the sheet
         let sheets = GoogleSheetsClient(spreadsheetID: GoogleSheetsClient.spreadsheetID(from: config.spreadsheet), tokens: tokens)
+        try await checkWorkbookTicker(sheets: sheets)
         let sheetPlan = try await SheetPlanner.plan(mapping: mapping, rows: rows, period: filing.period,
                                                     sheets: sheets, overwrite: config.overwrite)
         let plan = sheetPlan.writes

@@ -18,6 +18,25 @@ počítané kódem z SEC a zapsané jako vzorce. V obrazovce 10-K → Sheets nov
 - Stahování: submissions i companyfacts se stahují jednou pro 10-K i 10-Q; do mapování výkazů jdou
   dál jen roční údaje.
 - CLI: `finfill analyze` (analýzy do sešitu) a `finfill quarters` (offline kvartály + LTM z companyfacts).
+- **Příkazy v chatu**: zpráva `finfill new AMD` (i `/finfill`, velikost písmen nevadí) se neposílá modelu, ale
+  spustí FinFill – průběh jde do stavového řádku, odpověď je odkaz na sešit, kontrola DCF, Comps, kvartál
+  a souhrn. Dál `finfill analyze NVDA`, `finfill run NVDA` (náhled) / `finfill run NVDA zapsat`,
+  `peers AMD,INTC` a `fy2025` kdekoli v příkazu. Nastavení bere z obrazovky 10-K → Sheets (User-Agent,
+  vybraný sešit, přepínače, peery) a přihlášení ke Google; nový sešit se tam rovnou vybere.
+- **Kontrola tickeru sešitu**: zápis i analýzy nejdřív porovnají ticker v DCF!C4 s firmou – NVDA se už
+  nezapíše do „AMD Valuation“. Chat pak nabídne `finfill new NVDA`; vlastní sešity bez DCF!C4 se nekontrolují.
+- **Kontrola názvu sešitu**: když název vybraného souboru neobsahuje ticker (NVDA vs. „AMD Valuation FY2025“),
+  příkaz v chatu nic nezapíše a nabídne sešity z Disku s tickerem v názvu (nejnovější první), „Založit nový“
+  a „Přesto zapsat“. Vybírá se klepnutím na odkaz nebo napsáním čísla (15 minut); vybraný sešit se pak
+  nastaví i na obrazovce 10-K → Sheets. Cíl jde zadat i rovnou: `finfill analyze NVDA sešit <ID|URL>`.
+  Na obrazovce 10-K → Sheets se při nesouladu ukáže varování s výběrem sešitů vyfiltrovaným na ticker.
+- **`finfill new` a existující sešit**: když už na Disku je sešit s tickerem v názvu, nový se nezaloží
+  a nabídne se „Aktualizovat …“ (zápis posledního 10-K do existujícího sešitu, vyplněné buňky se
+  nepřepisují, obnoví se Citlivost, Comps a Kvartály) nebo „Přesto založit nový“ (`finfill new AMD přesto`).
+- **Karta s výběrem**: nabídky sešitů nejsou odkazy v textu, ale karta – štítek, otázka, možnosti pod sebou
+  s číslem, popisem (kdy byl sešit upravený) a „doporučeno“ u první; klepnutí možnost označí a odešle,
+  ostatní zešednou. V textu zprávy je jako blok ```aichat-choice s JSONem (`ChoicePrompt`), takže se uloží
+  s konverzací bez změny databáze. Napsat číslo možnosti funguje dál.
 - CLI s nastavením: stačí `finfill new AMD` / `finfill run NVDA --write` / `finfill analyze NVDA`. User-Agent,
   token (nebo `token_command`), sešit, model, jazyk, kvartály a peery pro každý ticker se ukládají přes
   `finfill config` do `~/.config/finfill/config.json`; přepínače mají přednost.

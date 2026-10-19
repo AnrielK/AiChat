@@ -25,6 +25,17 @@ struct RootView: View {
 
         NavigationStack {
             ChatView(chat: chat, dismissKeyboard: { composerFocused = false })
+                // Odkazy aichat://send?text=… v odpovědi (nabídka sešitů FinFillu) odešlou text jako zprávu.
+                .environment(\.openURL, OpenURLAction { url in
+                    guard url.scheme == "aichat", url.host == "send",
+                          let text = URLComponents(url: url, resolvingAgainstBaseURL: false)?
+                              .queryItems?.first(where: { $0.name == "text" })?.value,
+                          !chat.isGenerating
+                    else { return .systemAction }
+                    chat.draft = text
+                    send()
+                    return .handled
+                })
                 .alert("Historii nejde otevřít", isPresented: Binding(
                     get: { storageError != nil && !storageErrorShown },
                     set: { if !$0 { storageErrorShown = true } }

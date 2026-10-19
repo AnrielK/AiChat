@@ -7,6 +7,8 @@ import FinFillCore
 public struct FinFillView: View {
     @State private var model: FinFillViewModel
     @State private var showPicker = false
+    /// Hledání, se kterým se výběr sešitu otevře (ticker, když vybraný sešit nesedí).
+    @State private var pickerSearch = ""
     @FocusState private var focused: Field?
 
     enum Field { case ticker, sheet, userAgent, year, peers }
@@ -37,7 +39,7 @@ public struct FinFillView: View {
             }
         }
         .sheet(isPresented: $showPicker) {
-            SpreadsheetPickerView(tokens: model.tokens) { file in
+            SpreadsheetPickerView(tokens: model.tokens, initialSearch: pickerSearch) { file in
                 model.selectSpreadsheet(id: file.id, name: file.name)
             }
         }
@@ -54,6 +56,7 @@ public struct FinFillView: View {
 
             Button {
                 focused = nil
+                pickerSearch = ""
                 showPicker = true
             } label: {
                 LabeledContent {
@@ -65,6 +68,19 @@ public struct FinFillView: View {
                 }
             }
             .tint(.primary)
+
+            if model.sheetMismatch {
+                Button {
+                    focused = nil
+                    pickerSearch = model.trimmedTicker
+                    showPicker = true
+                } label: {
+                    Label("Název sešitu neobsahuje \(model.trimmedTicker) – vybrat sešit pro \(model.trimmedTicker)",
+                          systemImage: "exclamationmark.triangle.fill")
+                        .font(.subheadline)
+                        .foregroundStyle(.orange)
+                }
+            }
 
             DisclosureGroup("Zadat URL nebo ID ručně") {
                 TextField("https://docs.google.com/spreadsheets/d/…", text: $model.spreadsheet)
@@ -401,6 +417,12 @@ struct SpreadsheetPickerView: View {
     let tokens: AccessTokenProvider
     let onPick: (GoogleDriveClient.File) -> Void
 
+    init(tokens: AccessTokenProvider, initialSearch: String = "", onPick: @escaping (GoogleDriveClient.File) -> Void) {
+        self.tokens = tokens
+        self.onPick = onPick
+        _search = State(initialValue: initialSearch)
+    }
+
     @Environment(\.dismiss) private var dismiss
     @State private var files: [GoogleDriveClient.File] = []
     @State private var search = ""
@@ -513,6 +535,14 @@ final class FinFillViewModel {
     }
     var analysis: AnalysisReport?
     var quarterMarkdown: String?
+
+    var trimmedTicker: String { ticker.trimmingCharacters(in: .whitespaces).uppercased() }
+
+    /// Vybraný sešit nemá ticker v názvu (např. NVDA, ale vybraný „AMD Valuation FY2025“).
+    var sheetMismatch: Bool {
+        guard let name = spreadsheetName, !spreadsheet.isEmpty, !trimmedTicker.isEmpty else { return false }
+        return !SpreadsheetMatch.name(name, contains: trimmedTicker)
+    }
 
     var hasAnalyses: Bool {
         sensitivity || quarterly || !FinFillPipeline.normalizedPeers([peersText], excluding: ticker).isEmpty

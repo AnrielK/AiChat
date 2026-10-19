@@ -174,6 +174,27 @@ final class QuarterHistoryTests: XCTestCase {
         XCTAssertTrue(review.markdown().contains("## Výsledky"))
     }
 
+    func testTickerMatch() {
+        XCTAssertTrue(FinFillPipeline.sameTicker("NVDA", "nvda"))
+        XCTAssertTrue(FinFillPipeline.sameTicker("NASDAQ:NVDA", "NVDA"))
+        XCTAssertTrue(FinFillPipeline.sameTicker("BRK-B", "brk.b"))
+        XCTAssertFalse(FinFillPipeline.sameTicker("AMD", "NVDA"))
+        XCTAssertEqual(AnalysisError.tickerMismatch(workbook: "AMD", requested: "NVDA").errorDescription?.hasPrefix("Vybraný sešit patří k AMD"), true)
+    }
+
+    func testSpreadsheetNameMatch() {
+        XCTAssertTrue(SpreadsheetMatch.name("NVDA Valuation FY2026", contains: "NVDA"))
+        XCTAssertTrue(SpreadsheetMatch.name("valuace-nvda (kopie)", contains: "nvda"))
+        XCTAssertFalse(SpreadsheetMatch.name("AMD Valuation FY2025", contains: "NVDA"))
+        XCTAssertFalse(SpreadsheetMatch.name("NVDAX model", contains: "NVDA"))
+        XCTAssertTrue(SpreadsheetMatch.name("BRK.B DCF", contains: "BRK.B"))
+        let now = Date()
+        let files = [GoogleDriveClient.File(id: "1", name: "NVDA old", modified: now.addingTimeInterval(-1000)),
+                     GoogleDriveClient.File(id: "2", name: "AMD Valuation", modified: now),
+                     GoogleDriveClient.File(id: "3", name: "NVDA Valuation FY2026", modified: now)]
+        XCTAssertEqual(SpreadsheetMatch.candidates(files, ticker: "NVDA").map(\.id), ["3", "1"])
+    }
+
     func testPeerNormalization() {
         XCTAssertEqual(FinFillPipeline.normalizedPeers(["amd, AVGO;intc  nvda", "AMD"], excluding: "NVDA"), ["AMD", "AVGO", "INTC"])
     }

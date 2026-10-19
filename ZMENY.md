@@ -1,3 +1,30 @@
+# Analytické příkazy podle skillů anthropics/financial-services
+
+Lomítkové příkazy v chatu (i `finfill <příkaz>` v CLI). Data ze SEC (XBRL, podání, 8-K položky),
+text píše model z Nastavení podle osnovy skillu; čísla jen ověřená z XBRL. Konsenzus, ceny a zprávy
+v datech nejsou – výstupy to říkají.
+
+- `/earnings-analysis NVDA` – výsledky posledního kvartálu, YoY/QoQ, review MD&A (Q4 z 10-K, Item 7).
+- `/earnings-preview NVDA` – odhad termínu (8-K 2.02 loni + 52 týdnů), posledních 5 kvartálů, scénáře
+  optimistický / základní / pesimistický z historie QoQ a marží, model: na co se dívat, co by muselo nastat,
+  výhled vedení, otázky.
+- `/sector-overview NVDA AMD AVGO` – srovnání LTM (tržby, podíl ve skupině, růst, marže, FCF, čistý dluh),
+  mediány; model: dynamika, konkurenční pozice (z Item 1 10-K), trendy, implikace. Jen `NVDA` = s uloženými peery.
+- `/catalyst-calendar NVDA AMD` – tento týden, 60 dní (výsledky, 10-Q/10-K, valná hromada – odhady)
+  a podání za 14 dní s dopadem V/S/N. Tickery se uloží jako watchlist.
+- `/morning-note` – nová podání od posledního pracovního dne (8-K položky, 10-Q/10-K, Form 4),
+  rychlé srovnání výsledků, události týdne; model: hlavní bod a pohled na každou firmu.
+- `/thesis-tracker NVDA` – teze, pilíře, rizika, KPI kontrolované proti poslednímu kvartálu (✓/✗),
+  hodnocení pilířů modelem (drží / sledovat / porušen) a přesvědčení; deník s dopadem poznámky.
+  Úpravy: `teze`, `long`/`short`, `pilíř`, `riziko`, `kpi růst tržeb > 20 %`, `cíl`, `stop`, `poznámka`,
+  `odebrat pilíř 2`, `smazat`; bez tickeru seznam tezí. Ukládá se do Application Support/FinFill/theses.json.
+- `/valuation-reviewer NVDA` – kontrola ocenění v sešitu (obdoba agenta valuation-reviewer pro fondy):
+  DCF vs. Comps (podle metod) vs. trh, kontrola DCF, WACC (rf, beta, prémie, náklad dluhu), výchozí rok
+  DCF vs. LTM ze SEC; komentář modelu. Stejná kontrola sešitu jako u `finfill analyze` (karta s výběrem).
+- Testy: 7 nových (podání, termíny, kalendář, ranní okno, scénáře, teze, kontrola ocenění), celkem 52.
+
+---
+
 # FinFill: Citlivost, Comps, Kvartály a kontrola DCF
 
 Podle skillů dcf-model, comps-analysis a earnings-analysis z `anthropics/financial-services`, ale

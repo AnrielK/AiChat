@@ -222,6 +222,9 @@ final class ChatViewModel {
             // „finfill new AMD“ apod. – příkaz FinFillu, zpráva nejde modelu (viz FinFillCommand).
             if let command = FinFillCommandProvider.wrapping(text: text, settings: settings, models: models) {
                 provider = command
+            } else if let research = ResearchCommandProvider.wrapping(text: text, settings: settings, models: models) {
+                // /earnings-analysis, /earnings-preview, /sector-overview… (viz ResearchCommand)
+                provider = research
             } else {
                 let base = try settings.makeProvider(models: models, profile: profile)
 

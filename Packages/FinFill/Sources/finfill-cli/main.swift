@@ -220,6 +220,47 @@ do {
         if let d = r.analysis?.dcf { print("\n== Kontrola DCF\n" + d.logLines.joined(separator: "\n")) }
         print("\n\(r.title): \(r.url.absoluteString)")
 
+    case "earnings-analysis", "earnings-preview", "sector-overview", "catalyst-calendar", "morning-note", "thesis-tracker":
+        let ua = require(value("--ua", "ua"), "SEC User-Agent", "ua")
+        let skills = ResearchSkills(userAgent: ua, engine: engine(), language: value("--language", "language") ?? "Czech") {
+            FileHandle.standardError.write(($0 + "\n").data(using: .utf8)!)
+        }
+        let words = args.dropFirst().filter { !$0.hasPrefix("--") }
+        let tickers = words.flatMap { $0.split(separator: ",").map(String.init) }.map { $0.uppercased() }
+        switch args[0] {
+        case "earnings-analysis": print(try await skills.earningsAnalysis(require(tickers.first, "ticker")))
+        case "earnings-preview": print(try await skills.earningsPreview(require(tickers.first, "ticker")))
+        case "sector-overview":
+            var list = tickers
+            if list.count == 1, let p = settings.peers(for: list[0]) { list += p.split(separator: ",").map(String.init) }
+            print(try await skills.sectorOverview(list))
+        case "catalyst-calendar": print(try await skills.catalystCalendar(tickers))
+        case "morning-note": print(try await skills.morningNote(tickers))
+        default:
+            let store = ThesisStore(url: CLISettings.path.deletingLastPathComponent().appendingPathComponent("theses.json"))
+            let ticker = require(words.first?.uppercased(), "ticker (finfill thesis-tracker NVDA [úprava])")
+            var t = store.get(ticker) ?? Thesis(ticker: ticker)
+            let edit = ThesisEdit.parse(Array(words.dropFirst()))
+            switch edit {
+            case .show: print(try await skills.thesisReview(t).markdown)
+            case .delete: try store.delete(ticker); print("Teze \(ticker) smazána.")
+            case let .invalid(m): print(m)
+            default:
+                print(edit.apply(to: &t, today: FilingCalendar.today()) ?? "")
+                try store.save(t)
+            }
+        }
+
+    case "valuation":
+        let ticker = require(tickerArg(), "ticker (finfill valuation NVDA)")
+        let ua = require(value("--ua", "ua"), "SEC User-Agent", "ua")
+        let sheet = require(value("--sheet", "sheet"), "sešit (--sheet ID|URL)", "sheet")
+        var cfg = FinFillPipeline.Config(ticker: ticker, secUserAgent: ua, spreadsheet: sheet, mapping: try TemplateMapping.bundledUniversal())
+        if let l = value("--language", "language") { cfg.summaryOptions.language = l }
+        let pipeline = FinFillPipeline(config: cfg, tokens: StaticTokenProvider(token()), engine: engine())
+        let r = try await pipeline.valuationReview { e in if case let .log(s) = e { print(s) } }
+        print(r.markdown(ticker: ticker, sheet: sheet, commentary: await pipeline.valuationCommentary(r)))
+
     case "config":
         switch args.dropFirst().first {
         case "set":
@@ -251,6 +292,13 @@ do {
           finfill run NVDA [--write]         výkazy do sešitu z nastavení (bez --write náhled)
           finfill analyze NVDA               jen Citlivost / Comps / Kvartály
           finfill quarters --companyfacts F  offline kvartály a LTM
+          finfill earnings-analysis NVDA     výsledky posledního kvartálu
+          finfill earnings-preview NVDA      náhled příštích výsledků
+          finfill sector-overview NVDA AMD   přehled odvětví
+          finfill catalyst-calendar NVDA AMD kalendář katalyzátorů
+          finfill morning-note NVDA AMD      ranní poznámka z nových podání
+          finfill thesis-tracker NVDA […]    investiční teze (~/.config/finfill/theses.json)
+          finfill valuation NVDA             kontrola ocenění v sešitu
           finfill local --html F             offline 10-K
           finfill config                     nastavení (ua, token_command, sheet, llm, peers…)
         """)

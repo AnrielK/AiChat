@@ -1,0 +1,55 @@
+name: FinFill testy
+run-name: FinFill testy · ${{ github.ref_name }}
+
+# Rychlá kontrola balíčku Packages/FinFill na Linuxu (FinFillCore + CLI + unit testy).
+# FinFillUI je jen pro iOS – ověří ho až build IPA.
+on:
+  push:
+    paths:
+      - 'Packages/FinFill/**'
+      - '.github/workflows/finfill-tests.yml'
+  workflow_dispatch:
+
+defaults:
+  run:
+    shell: bash   # -eo pipefail: chyba swiftu se neztratí v | tee
+
+jobs:
+  test:
+    name: swift test (Linux)
+    runs-on: ubuntu-24.04
+    container: swift:6.1-noble
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          sparse-checkout: |
+            Packages/FinFill
+            .github
+
+      - name: Build
+        working-directory: Packages/FinFill
+        run: swift build --build-tests 2>&1 | tee build.log
+
+      - name: Test
+        working-directory: Packages/FinFill
+        run: swift test --skip-build 2>&1 | tee test.log
+
+      - name: Souhrn
+        if: always()
+        working-directory: Packages/FinFill
+        run: |
+          {
+            echo "### FinFill"
+            if [ -f build.log ]; then
+              echo '```'
+              grep -E "error:|warning: unre|Compiling|Build complete" build.log | grep -v Compiling | head -60 || true
+              echo '```'
+            fi
+            if [ -f test.log ]; then
+              echo '```'
+              grep -E "error:|failed|passed|Executed" test.log | tail -40 || true
+              echo '```'
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"

@@ -98,28 +98,7 @@ public struct Summarizer: Sendable {
                           progress: @Sendable (Progress) -> Void = { _ in }) async throws -> Result {
         let text = HTMLText.toPlainText(filingHTML)
         let sections = FilingSections.extract(plainText: text, items: options.items)
-        var out: [(String, String, String)] = []
-
-        for sec in sections {
-            let chunks = FilingSections.chunk(sec.text, maxChars: chunkChars)
-            var notes: [String] = []
-            for (i, chunk) in chunks.enumerated() {
-                progress(.section(item: sec.item, chunk: i + 1, of: chunks.count))
-                let p = """
-                10-K of \(company), Item \(sec.item) (\(sec.title)), part \(i + 1) of \(chunks.count).
-                Extract the points that matter for an investor as 3–8 short bullet points \
-                (business drivers, changes vs. prior year, guidance, risks, capital allocation). \
-                Skip boilerplate and legal disclaimers.
-
-                TEXT:
-                \(chunk)
-                """
-                notes.append(try await ask(p, maxTokens: options.notesMaxTokens))
-            }
-            progress(.reducing(item: sec.item))
-            let summary = notes.count == 1 ? notes[0] : try await reduce(notes, section: sec)
-            out.append((sec.item, sec.title, summary))
-        }
+        let out = try await sectionSummaries(sections, document: "10-K", company: company, progress: progress)
 
         progress(.final)
         let joined = out.map { "### Item \($0.0) — \($0.1)\n\($0.2)" }.joined(separator: "\n\n")
@@ -136,6 +115,34 @@ public struct Summarizer: Sendable {
             if SummaryBrief.parse(retry) != nil { exec = retry }
         }
         return Result(sections: out, executiveSummary: exec, keyFigures: keyFigures, language: options.language)
+    }
+
+    /// Map-reduce of filing sections: chunks → notes → section summary.
+    /// - Parameter document: „10-K“ / „10-Q“ (jen do promptu).
+    public func sectionSummaries(_ sections: [FilingSection], document: String, company: String,
+                                 progress: @Sendable (Progress) -> Void = { _ in }) async throws -> [(item: String, title: String, summary: String)] {
+        var out: [(item: String, title: String, summary: String)] = []
+        for sec in sections {
+            let chunks = FilingSections.chunk(sec.text, maxChars: chunkChars)
+            var notes: [String] = []
+            for (i, chunk) in chunks.enumerated() {
+                progress(.section(item: sec.item, chunk: i + 1, of: chunks.count))
+                let p = """
+                \(document) of \(company), Item \(sec.item) (\(sec.title)), part \(i + 1) of \(chunks.count).
+                Extract the points that matter for an investor as 3–8 short bullet points \
+                (business drivers, changes vs. prior year, guidance, risks, capital allocation). \
+                Skip boilerplate and legal disclaimers.
+
+                TEXT:
+                \(chunk)
+                """
+                notes.append(try await ask(p, maxTokens: options.notesMaxTokens))
+            }
+            progress(.reducing(item: sec.item))
+            let summary = notes.count == 1 ? notes[0] : try await reduce(notes, section: sec)
+            out.append((sec.item, sec.title, summary))
+        }
+        return out
     }
 
     /// Hierarchical reduce so it also fits small contexts.

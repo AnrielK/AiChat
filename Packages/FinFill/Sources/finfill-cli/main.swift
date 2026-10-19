@@ -8,6 +8,9 @@ import FinFillCore
 //               [--write] [--overwrite] [--fy 2026] [--llm URL --model NAME]
 //   finfill new --ticker AMD --ua "Name email@x.com" --token <OAuth token> [--fy 2025]   (new workbook, 9 years)
 //   finfill local --html F --universal --all-years --emit-json cells.json                (offline, all years)
+//   finfill analyze --ticker NVDA --ua "Name email@x.com" --sheet <ID|URL> --token <OAuth token>
+//                   [--peers AMD,AVGO,INTC] [--quarterly] [--no-sensitivity] [--llm URL --model NAME]
+//   finfill quarters --companyfacts CIK0001045810.json [--peers-facts AMD=CIK0000002488.json,...]  (offline)
 
 let args = Array(CommandLine.arguments.dropFirst())
 func opt(_ name: String) -> String? { args.firstIndex(of: name).flatMap { args.indices.contains($0 + 1) ? args[$0 + 1] : nil } }
@@ -107,6 +110,48 @@ do {
                 FileHandle.standardError.write("… \(p)\n".data(using: .utf8)!)
             }
             print("\n" + res.markdown(company: filing.company))
+        }
+
+    case "analyze":
+        guard let ticker = opt("--ticker"), let ua = opt("--ua"), let sheet = opt("--sheet"), let token = opt("--token") else {
+            print("--ticker, --ua, --sheet, --token required"); exit(2)
+        }
+        var cfg = FinFillPipeline.Config(ticker: ticker, secUserAgent: ua, spreadsheet: sheet, mapping: try TemplateMapping.bundledUniversal())
+        cfg.fiscalYear = opt("--fy").flatMap(Int.init)
+        cfg.sensitivity = !flag("--no-sensitivity")
+        cfg.peers = opt("--peers").map { [$0] } ?? []
+        cfg.quarterly = flag("--quarterly")
+        if let l = opt("--language") { cfg.summaryOptions.language = l }
+        let (_, a) = try await FinFillPipeline(config: cfg, tokens: StaticTokenProvider(token), engine: engine())
+            .analyzeOnly { e in if case let .log(s) = e { print(s) } }
+        if let d = a.dcf { print("\n== Kontrola DCF\n" + d.logLines.joined(separator: "\n")) }
+        if let q = a.quarter { print("\n" + q.markdown()) }
+        for n in a.notes { print("note: \(n)") }
+
+    case "quarters":
+        guard let path = opt("--companyfacts") else { print("--companyfacts required"); exit(2) }
+        let cf = try CompanyFactsParser.parse(Data(contentsOf: URL(fileURLWithPath: path)),
+                                              forms: CompanyFactsParser.annualAndQuarterlyForms)
+        let figures = QuarterlyFigures.compute(facts: cf.facts)
+        print(figures.markdown(maxColumns: 8))
+        print("\n" + figures.promptTable())
+        let target = CompanySnapshot.compute(ticker: opt("--ticker") ?? "TARGET", name: cf.entityName ?? "Company", facts: cf.facts)
+        var peers: [CompanySnapshot] = []
+        for pair in (opt("--peers-facts") ?? "").split(separator: ",") {
+            let kv = pair.split(separator: "=", maxSplits: 1).map(String.init)
+            guard kv.count == 2 else { continue }
+            let p = try CompanyFactsParser.parse(Data(contentsOf: URL(fileURLWithPath: kv[1])), forms: CompanyFactsParser.annualAndQuarterlyForms)
+            peers.append(CompanySnapshot.compute(ticker: kv[0], name: p.entityName ?? kv[0], facts: p.facts))
+        }
+        for s in [target] + peers {
+            func m(_ v: Double?) -> String { v.map { String(format: "%.0f", $0 / 1e6) } ?? "—" }
+            print("\(s.ticker.padding(toLength: 6, withPad: " ", startingAt: 0)) LTM \(s.ltmEnd ?? "—")(\(s.ltmQuarters)q) rev \(m(s.revenue)) "
+                  + "ebitda \(m(s.ebitda)) ni \(m(s.netIncome)) fcf \(m(s.freeCashFlow)) netDebt \(m(s.netDebt)) "
+                  + "shares \(s.shares.map { String(format: "%.1fM", $0 / 1e6) } ?? "—") growth \(s.revenueGrowth.map { String(format: "%.1f%%", $0 * 100) } ?? "—")")
+        }
+        if let out = opt("--emit-comps") {
+            let req = CompsSheet.requests(sheetId: 1, target: target, peers: peers, hasDCF: true)
+            try JSONSerialization.data(withJSONObject: req, options: [.prettyPrinted]).write(to: URL(fileURLWithPath: out))
         }
 
     case "run":

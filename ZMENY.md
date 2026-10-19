@@ -1,3 +1,27 @@
+# FinFill: Citlivost, Comps, Kvartály a kontrola DCF
+
+Podle skillů dcf-model, comps-analysis a earnings-analysis z `anthropics/financial-services`, ale
+počítané kódem z SEC a zapsané jako vzorce. V obrazovce 10-K → Sheets nová sekce **Analýzy** a tlačítko
+**Jen analýzy do sešitu**; listy vzniknou při zápisu, v novém sešitu i samostatně.
+
+- **Citlivost** (za WACC): cena na akcii pro WACC × TGR kolem předpokladů vybraného scénáře, potenciál vůči
+  aktuální ceně a **Kontrola modelu** živými vzorci (TGR < WACC, podíl TV na EV, pásmo WACC, exit
+  EV/EBITDA, FCF v posledním roce, marže a růst vs. historie). Střed tabulky = DCF!M58.
+- **Kontrola DCF v appce**: po zápisu se DCF přečte a ukáže ✓ / ℹ︎ / ⚠︎ / ✗ se stejnými hranicemi.
+  Když GOOGLEFINANCE v novém sešitu ještě načítá, čte se znovu (až 3×).
+- **Comps**: peery tickerem (pamatují se pro každý ticker). LTM ze součtu 4 kvartálů, EBITDA, čistý dluh,
+  počet akcií ze SEC; cena GOOGLEFINANCE, EV, marže, EV/Tržby, EV/EBITDA, P/E, FCF výnos jako vzorce;
+  statistiky jen z peerů a implikovaná cena z kvartilů vs. aktuální cena a DCF.
+- **Kvartály**: 8 posledních kvartálů z companyfacts (výsledovka přímo nebo z YTD, cash flow z YTD,
+  Q4 = rok − 9 měsíců, dopočtené kurzívou), marže, YoY a QoQ. Earnings review posledního 10-Q modelem
+  (MD&A → šablona: v kostce, výsledky, co táhlo, výhled, co upravit v modelu, rizika). Bez konsenzu analytiků.
+- Stahování: submissions i companyfacts se stahují jednou pro 10-K i 10-Q; do mapování výkazů jdou
+  dál jen roční údaje.
+- CLI: `finfill analyze` (analýzy do sešitu) a `finfill quarters` (offline kvartály + LTM z companyfacts).
+- Testy: 11 nových (syntetická firma s 10-K a 10-Q), celkem 43.
+
+---
+
 # Segments: jeden řádek na segment
 
 - Firmy identifikátor segmentu mezi lety přejmenují (NVIDIA `ComputeAndNetworkingMember` →

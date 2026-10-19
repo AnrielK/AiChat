@@ -29,7 +29,8 @@ SEC companyfacts JSON ─┐                        ┌─ kontroly součtů (14
 | `Sources/FinFillUI/FinFillView.swift` | SwiftUI obrazovka (iOS 17+): náhled → zápis → souhrn |
 | `Sources/finfill-cli` | CLI pro Mac (offline nad staženým 10-K, nebo online do Sheets) |
 | `Sources/FinFillCore/Templates` | `SpreadsheetTemplate` + `TemplateRequests` (Sheets API create/updateCells/merge/šířky), `WorkbookFiller` (všechny roky) |
-| `Tests/` | 18 testů nad přiloženým NVDA 10-K |
+| `Sources/FinFillCore/Analysis` | Citlivost + kontrola DCF (`SensitivitySheet`, `DCFReview`), Comps (`CompanySnapshot`, `CompsSheet`), kvartály a earnings review (`QuarterHistory`, `QuarterlyFigures`, `QuarterBrief`, `QuarterSheet`), `runAnalyses` |
+| `Tests/` | testy nad přiloženým NVDA 10-K + syntetická companyfacts s 10-Q (`AnalysisTests.swift`) |
 
 `FinFillCore` je čistý Foundation (běží na iOS, macOS i Linuxu), `FinFillUI` jen na iOS.
 
@@ -135,6 +136,39 @@ mlx_lm.server --model SiddhJagani/Qwen3.8-4B-mlx-4Bit --port 8080
 swift run finfill local --html nvda-20260125.htm --llm http://localhost:8080/v1 --model default --ctx 8192
 ```
 
+## Analýzy (Citlivost, Comps, Kvartály)
+
+Inspirované skilly `dcf-model`, `comps-analysis` a `earnings-analysis` z
+[anthropics/financial-services](https://github.com/anthropics/financial-services), ale počítané kódem z dat SEC
+a zapsané jako vzorce, takže list reaguje na změny v DCF i na cenu. Běží po zápisu, v novém sešitu
+i samostatně tlačítkem **Jen analýzy do sešitu** (třeba po novém 10-Q). Každý list se při běhu vytvoří znovu.
+
+- **Citlivost** (za WACC): implikovaná cena na akcii pro WACC × TGR (±0,5 a ±1 p.b. kolem předpokladů
+  vybraného scénáře), stejný výpočet jako DCF!I49:M58 – střed tabulky se musí rovnat DCF!M58. Pod tím
+  potenciál vůči DCF!H5 a **Kontrola modelu** živými vzorci: WACC 6–15 %, TGR < WACC a ≤ 4 %, podíl TV na
+  EV (nad 75 % pozor, nad 85 % chyba), implikovaný exit EV/EBITDA 5–30x, kladné FCF v posledním roce,
+  marže nad historickým maximem + 5 p.b., růst 1. roku vs. historie, extrémní potenciál.
+  Aplikace po zápisu přečte DCF a ukáže tytéž kontroly (`DCFReview`, hranice v `Thresholds`).
+  Platí jen pro DCF z univerzální šablony – pozná se podle popisků ve sloupci B, jinak se přeskočí.
+- **Comps**: peery zadané tickerem (pamatují se pro každý ticker). Pro každou firmu companyfacts
+  (10-K i 10-Q): LTM = součet posledních 4 kvartálů (kvartály se dopočítají z YTD, Q4 = rok − 9M),
+  EBITDA = EBIT + odpisy, poslední rozvaha (hotovost + krátkodobé investice, dluh), počet akcií z titulní
+  strany. Cena `GOOGLEFINANCE`, tržní kapitalizace, EV, marže, EV/Tržby, EV/EBITDA, P/E a FCF výnos jsou
+  vzorce; pod tím max / 75. percentil / medián / 25. percentil / min jen z peerů a implikovaná cena cílové
+  firmy z kvartilů, porovnaná s aktuální cenou a s DCF!H4.
+- **Kvartály**: posledních 8 kvartálů (tržby, hrubý a provozní zisk, čistý zisk, EPS, provozní CF, capex,
+  FCF), marže, YoY (sloupec se hledá podle štítku kvartálu) a QoQ. Dopočtené hodnoty kurzívou. Když je
+  poslední kvartál z 10-Q a je zapnutý souhrn modelem, MD&A z 10-Q (Part I Item 2) projde stejným
+  map-reduce jako 10-K a model vyplní šablonu `QuarterBrief`: kvartál v kostce, výsledky, co táhlo,
+  výhled vedení, co upravit v modelu, rizika. Konsenzus analytiků v SEC není, beat/miss se nehodnotí.
+
+```bash
+swift run finfill quarters --companyfacts CIK0001045810.json --ticker NVDA \
+    --peers-facts AMD=CIK0000002488.json,AVGO=CIK0001730168.json          # offline: kvartály + LTM
+swift run finfill analyze --ticker NVDA --ua "Jméno email@x.cz" --sheet <ID> --token <OAuth> \
+    --peers AMD,AVGO,INTC --quarterly [--llm http://localhost:8080/v1 --model default]
+```
+
 ## Jiná firma / jiná šablona
 
 Mapování je jen JSON. Pro jinou firmu se stejnou šablonou většinou stačí upravit segmentové řádky
@@ -146,5 +180,5 @@ buňky a kontroly bez sítě.
 ## Testy
 
 ```bash
-swift test          # 18 testů: iXBRL, mapování FY2026, backtest FY2025 vs. šablona, plánovač, sekce, souhrn (mock), companyfacts, helpery
+swift test          # 43 testů: iXBRL, mapování, backtest, plánovač, šablona, segmenty, souhrn (mock), kvartály z YTD, LTM, Comps, citlivost a kontrola DCF
 ```

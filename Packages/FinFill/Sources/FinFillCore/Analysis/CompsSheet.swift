@@ -159,8 +159,9 @@ public enum CompsSheet {
             ((C.price)...(C.fcfYield)).map { (column: $0, px: 92) } + [(column: C.ltm, px: 110)]
         return grid(target: target, peers: peers, hasDCF: hasDCF).requests(sheetId: sheetId, widths: widths)
             + [["updateSheetProperties": [
-                "properties": ["sheetId": sheetId, "gridProperties": ["frozenRowCount": 5, "frozenColumnCount": 3]],
-                "fields": "gridProperties.frozenRowCount,gridProperties.frozenColumnCount",
+                // Jen řádky: sloučená poznámka v ř. 3 by zamrznutí sloupců zablokovala (API to odmítne).
+                "properties": ["sheetId": sheetId, "gridProperties": ["frozenRowCount": 5]],
+                "fields": "gridProperties.frozenRowCount",
             ] as [String: Any]]]
     }
 

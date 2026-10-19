@@ -12,7 +12,7 @@ import FinFillCore
 ///     … sešit <ID|URL>                 kam zapsat (jinak vybraný sešit; ten se tím přepne)
 ///
 /// Když název vybraného sešitu ticker neobsahuje, nic se nezapíše a odpověď nabídne soubory
-/// z Disku s tickerem v názvu – klepnutím na odkaz (aichat://send) nebo napsáním čísla.
+/// z Disku s tickerem v názvu jako kartu s možnostmi (ChoicePrompt) – klepnutím nebo napsáním čísla.
 ///
 /// Funguje s lomítkem i bez (`/finfill …`) a bez ohledu na velikost písmen. Zpráva se modelu
 /// neposílá – příkaz spustí FinFill a odpověď je jeho výsledek (průběh jde do stavového řádku).
@@ -90,15 +90,6 @@ struct FinFillCommand: Sendable, Equatable {
     /// Stejný příkaz s jiným cílovým sešitem.
     func with(sheet id: String) -> FinFillCommand {
         var c = self; c.sheet = id; return c
-    }
-
-    /// Odkaz, který v chatu po klepnutí odešle příkaz jako novou zprávu.
-    static func link(_ title: String, _ command: String) -> String {
-        var comps = URLComponents()
-        comps.scheme = "aichat"; comps.host = "send"
-        comps.queryItems = [URLQueryItem(name: "text", value: command)]
-        let label = title.replacingOccurrences(of: "[", with: "(").replacingOccurrences(of: "]", with: ")")
-        return "[\(label)](\(comps.url?.absoluteString ?? ""))"
     }
 
     static let help = """
@@ -316,57 +307,59 @@ struct FinFillCommandProvider: ChatProvider {
     /// `finfill new` a sešit s tickerem už existuje: aktualizovat ho (zápis posledního 10-K + analýzy),
     /// nebo přesto založit nový.
     static func offerExisting(_ files: [GoogleDriveClient.File], for command: FinFillCommand, ticker: String) -> String {
-        let rel = RelativeDateTimeFormatter()
-        rel.locale = Locale(identifier: "cs_CZ")
-        var choices: [(title: String, command: String)] = files.map { f in
-            let when = f.modified.map { " · upraveno " + rel.localizedString(for: $0, relativeTo: .now) } ?? ""
+        var options: [ChoicePrompt.Option] = files.enumerated().map { i, f in
             let update = FinFillCommand(action: .run(write: true), ticker: ticker, peers: nil,
                                         fiscalYear: command.fiscalYear, sheet: f.id)
-            return ("Aktualizovat „\(f.name)“" + when, update.text)
+            return .init(label: "Aktualizovat „\(f.name)“", detail: modified(f), command: update.text,
+                         recommended: i == 0 ? true : nil)
         }
         var fresh = command
         fresh.force = true
-        choices.append(("Přesto založit nový sešit pro \(ticker)", fresh.text))
-
-        var md = "Na Disku už \(files.count == 1 ? "je sešit" : "jsou sešity") s \(ticker) v názvu. Co udělat?\n\n"
-        for (i, c) in choices.enumerated() { md += "\(i + 1). " + FinFillCommand.link(c.title, c.command) + "\n" }
-        md += "\n_Aktualizace zapíše poslední 10-K do existujícího sešitu (vyplněné buňky nepřepisuje) a obnoví Citlivost, Comps a Kvartály._\n"
-        md += "\nKlepni na možnost, nebo napiš její číslo."
-        PendingChoice.save(choices.map(\.command))
-        return md
+        options.append(.init(label: "Založit nový sešit", detail: "\(ticker) Valuation ze šablony, 9 let", command: fresh.text))
+        let prompt = ChoicePrompt(
+            header: "Sešit",
+            question: "Na Disku už \(files.count == 1 ? "je sešit" : "jsou sešity") s \(ticker) v názvu. Aktualizovat, nebo založit nový?",
+            options: options,
+            footnote: "Aktualizace zapíše poslední 10-K (vyplněné buňky nepřepíše) a obnoví Citlivost, Comps a Kvartály. Můžeš taky napsat číslo možnosti.")
+        PendingChoice.save(options.map(\.command))
+        return prompt.markdownBlock
     }
 
     /// Nabídka, kam zapsat: soubory z Disku s tickerem v názvu, nový sešit, případně vybraný i tak.
     static func offerSheets(for command: FinFillCommand, ticker: String, current: String, currentID: String,
                             allowCurrent: Bool = true) async -> String {
-        var md = "Vybraný sešit **\(current)** neodpovídá \(ticker), takže jsem nic nezapsal. Kam zapsat?\n\n"
-        var choices: [(title: String, command: String)] = []
-        var driveError: String?
+        var options: [ChoicePrompt.Option] = []
+        var note = "Můžeš taky napsat číslo možnosti."
         do {
             let files = try await GoogleDriveClient(tokens: GoogleTokenProvider()).spreadsheets(search: ticker, limit: 50)
-            let rel = RelativeDateTimeFormatter()
-            rel.locale = Locale(identifier: "cs_CZ")
             for f in SpreadsheetMatch.candidates(files, ticker: ticker) where f.id != currentID {
-                let when = f.modified.map { " · upraveno " + rel.localizedString(for: $0, relativeTo: .now) } ?? ""
-                choices.append((f.name + when, command.with(sheet: f.id).text))
+                options.append(.init(label: f.name, detail: modified(f), command: command.with(sheet: f.id).text,
+                                     recommended: options.isEmpty ? true : nil))
             }
+            if options.isEmpty { note = "Na Disku není žádný sešit s „\(ticker)“ v názvu. " + note }
         } catch {
-            driveError = error.localizedDescription
+            note = "Seznam z Disku se nepodařilo načíst: \(error.localizedDescription)"
         }
-        choices.append(("Založit nový sešit pro \(ticker)", FinFillCommand(action: .new, ticker: ticker, peers: nil,
-                                                                            fiscalYear: command.fiscalYear).text))
-        if allowCurrent { choices.append(("Přesto zapsat do „\(current)“", command.with(sheet: currentID).text)) }
+        options.append(.init(label: "Založit nový sešit", detail: "\(ticker) Valuation ze šablony, 9 let",
+                             command: FinFillCommand(action: .new, ticker: ticker, peers: nil, fiscalYear: command.fiscalYear,
+                                                     force: true).text))
+        if allowCurrent {
+            options.append(.init(label: "Přesto zapsat do „\(current)“", detail: "název ticker neobsahuje",
+                                 command: command.with(sheet: currentID).text))
+        }
+        let prompt = ChoicePrompt(
+            header: "Sešit",
+            question: "Vybraný sešit „\(current)“ neodpovídá \(ticker). Kam zapsat?",
+            options: options, footnote: note)
+        PendingChoice.save(options.map(\.command))
+        return prompt.markdownBlock
+    }
 
-        for (i, c) in choices.enumerated() {
-            md += "\(i + 1). " + FinFillCommand.link(c.title, c.command) + "\n"
-        }
-        if choices.count == (allowCurrent ? 2 : 1) {
-            md += "\n_Na Disku není žádný sešit s „\(ticker)“ v názvu._\n"
-        }
-        if let driveError { md += "\n_Seznam z Disku se nepodařilo načíst: \(driveError)_\n" }
-        md += "\nKlepni na možnost, nebo napiš její číslo."
-        PendingChoice.save(choices.map(\.command))
-        return md
+    static func modified(_ f: GoogleDriveClient.File) -> String? {
+        guard let d = f.modified else { return nil }
+        let rel = RelativeDateTimeFormatter()
+        rel.locale = Locale(identifier: "cs_CZ")
+        return "upraveno " + rel.localizedString(for: d, relativeTo: .now)
     }
 
     static func analysisMarkdown(_ a: AnalysisReport?) -> String {

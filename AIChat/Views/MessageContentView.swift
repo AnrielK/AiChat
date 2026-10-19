@@ -32,6 +32,8 @@ struct MessageContentView: View {
                     )
                 case .table(let table):
                     TableBlockView(table: table, fileName: MessageBlock.tableFileName(for: index, in: blocks))
+                case .choice(let prompt):
+                    ChoiceCardView(prompt: prompt)
                 }
             }
         }
@@ -46,6 +48,8 @@ enum MessageBlock: Equatable {
     /// `closed` = false, dokud model blok ještě píše (chybí uzavírací ```).
     case code(language: String, code: String, closed: Bool)
     case table(MarkdownTable)
+    /// Výběr z možností (```aichat-choice s JSONem) – karta s tlačítky.
+    case choice(ChoicePrompt)
 
     /// Rozdělí markdown na bloky. Řeší jen to, co SwiftUI `Text` neumí: bloky kódu,
     /// nadpisy, oddělovače a tabulky. Zbytek (tučné, kurzíva, `kód`, odkazy) zůstane inline markdownu.
@@ -75,7 +79,12 @@ enum MessageBlock: Equatable {
             if let open = fence {
                 // Uzavírací značka: jen backticky/vlnovky, aspoň tolik jako u otevření.
                 if trimmed.hasPrefix(open), trimmed.allSatisfy({ $0 == open.first }) {
-                    blocks.append(.code(language: language, code: code.joined(separator: "\n"), closed: true))
+                    let body = code.joined(separator: "\n")
+                    if language == ChoicePrompt.language, let prompt = ChoicePrompt.decode(body) {
+                        blocks.append(.choice(prompt))
+                    } else {
+                        blocks.append(.code(language: language, code: body, closed: true))
+                    }
                     code = []
                     fence = nil
                 } else {

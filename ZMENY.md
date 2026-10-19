@@ -33,6 +33,10 @@ počítané kódem z SEC a zapsané jako vzorce. V obrazovce 10-K → Sheets nov
 - **`finfill new` a existující sešit**: když už na Disku je sešit s tickerem v názvu, nový se nezaloží
   a nabídne se „Aktualizovat …“ (zápis posledního 10-K do existujícího sešitu, vyplněné buňky se
   nepřepisují, obnoví se Citlivost, Comps a Kvartály) nebo „Přesto založit nový“ (`finfill new AMD přesto`).
+- **Karta s výběrem**: nabídky sešitů nejsou odkazy v textu, ale karta – štítek, otázka, možnosti pod sebou
+  s číslem, popisem (kdy byl sešit upravený) a „doporučeno“ u první; klepnutí možnost označí a odešle,
+  ostatní zešednou. V textu zprávy je jako blok ```aichat-choice s JSONem (`ChoicePrompt`), takže se uloží
+  s konverzací bez změny databáze. Napsat číslo možnosti funguje dál.
 - CLI s nastavením: stačí `finfill new AMD` / `finfill run NVDA --write` / `finfill analyze NVDA`. User-Agent,
   token (nebo `token_command`), sešit, model, jazyk, kvartály a peery pro každý ticker se ukládají přes
   `finfill config` do `~/.config/finfill/config.json`; přepínače mají přednost.

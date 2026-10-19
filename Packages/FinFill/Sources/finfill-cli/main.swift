@@ -2,12 +2,22 @@ import Foundation
 import FinFillCore
 
 // Usage:
+//   finfill new AMD                      (zbytek z nastavení – viz `finfill config`)
+//   finfill run NVDA [--write]           (sešit z nastavení „sheet“ nebo --sheet)
+//   finfill analyze NVDA [--peers AMD,AVGO] [--quarterly]
+//   finfill config                       (výpis)   finfill config set ua "Jméno email@x.cz"
+//   finfill config peers NVDA AMD,AVGO,INTC       finfill config unset token
+//
+//   Plné tvary (přepínače mají přednost před nastavením):
 //   finfill local --html nvda-20260125.htm [--companyfacts CIK0001045810.json] [--mapping m.json]
 //                 [--column O] [--emit-json cells.json] [--llm http://localhost:8080/v1 --model qwen3.5-4b] [--language Czech]
 //   finfill run --ticker NVDA --ua "Name email@x.com" --sheet <ID|URL> --token <OAuth token>
 //               [--write] [--overwrite] [--fy 2026] [--llm URL --model NAME]
 //   finfill new --ticker AMD --ua "Name email@x.com" --token <OAuth token> [--fy 2025]   (new workbook, 9 years)
 //   finfill local --html F --universal --all-years --emit-json cells.json                (offline, all years)
+//   finfill analyze --ticker NVDA --ua "Name email@x.com" --sheet <ID|URL> --token <OAuth token>
+//                   [--peers AMD,AVGO,INTC] [--quarterly] [--no-sensitivity] [--llm URL --model NAME]
+//   finfill quarters --companyfacts CIK0001045810.json [--peers-facts AMD=CIK0000002488.json,...]  (offline)
 
 let args = Array(CommandLine.arguments.dropFirst())
 func opt(_ name: String) -> String? { args.firstIndex(of: name).flatMap { args.indices.contains($0 + 1) ? args[$0 + 1] : nil } }
@@ -19,10 +29,44 @@ func loadMapping() throws -> TemplateMapping {
     return try TemplateMapping.bundledNVDA()
 }
 
+var settings = CLISettings.load()
+
+/// Přepínač, jinak nastavení (FINFILL_<KLÍČ> nebo config.json).
+func value(_ flagName: String, _ key: String) -> String? { opt(flagName) ?? settings.string(key) }
+
+/// Ticker: `--ticker NVDA` nebo první slovo po příkazu (`finfill new AMD`).
+func tickerArg() -> String? {
+    if let t = opt("--ticker") { return t.uppercased() }
+    guard args.count >= 2, !args[1].hasPrefix("--") else { return nil }
+    return args[1].uppercased()
+}
+
+func require(_ v: String?, _ what: String, _ key: String? = nil) -> String {
+    if let v, !v.isEmpty { return v }
+    if let key {
+        print("Chybí \(what). Zadej ho přepínačem, nebo jednou do nastavení: finfill config set \(key) <hodnota>")
+    } else {
+        print("Chybí \(what).")
+    }
+    exit(2)
+}
+
+func token() -> String {
+    require(opt("--token") ?? settings.oauthToken(), "OAuth token Google", "token_command")
+}
+
 func engine() -> LLMEngine? {
-    guard let u = opt("--llm"), let url = URL(string: u) else { return nil }
-    return OpenAICompatibleEngine(baseURL: url, model: opt("--model") ?? "default",
-                                  contextTokens: Int(opt("--ctx") ?? "") ?? 32_768)
+    guard let u = value("--llm", "llm"), let url = URL(string: u) else { return nil }
+    return OpenAICompatibleEngine(baseURL: url, model: value("--model", "model") ?? "default",
+                                  contextTokens: Int(value("--ctx", "ctx") ?? "") ?? 32_768)
+}
+
+/// Citlivost, Comps a Kvartály: přepínače > nastavení.
+func applyAnalyses(_ cfg: inout FinFillPipeline.Config) {
+    cfg.sensitivity = !flag("--no-sensitivity") && (settings.bool("sensitivity") ?? true)
+    cfg.quarterly = flag("--quarterly") || (!flag("--no-quarterly") && (settings.bool("quarterly") ?? false))
+    if let p = opt("--peers") ?? settings.peers(for: cfg.ticker) { cfg.peers = [p] }
+    if let l = value("--language", "language") { cfg.summaryOptions.language = l }
 }
 
 func printRows(_ rows: [ResolvedRow], column: String, title: String) {
@@ -109,16 +153,55 @@ do {
             print("\n" + res.markdown(company: filing.company))
         }
 
-    case "run":
-        guard let ticker = opt("--ticker"), let ua = opt("--ua"), let sheet = opt("--sheet"), let token = opt("--token") else {
-            print("--ticker, --ua, --sheet, --token required"); exit(2)
+    case "analyze":
+        let ticker = require(tickerArg(), "ticker (finfill analyze NVDA)")
+        let ua = require(value("--ua", "ua"), "SEC User-Agent", "ua")
+        let sheet = require(value("--sheet", "sheet"), "sešit (--sheet ID|URL)", "sheet")
+        var cfg = FinFillPipeline.Config(ticker: ticker, secUserAgent: ua, spreadsheet: sheet, mapping: try TemplateMapping.bundledUniversal())
+        cfg.fiscalYear = opt("--fy").flatMap(Int.init)
+        applyAnalyses(&cfg)
+        let (_, a) = try await FinFillPipeline(config: cfg, tokens: StaticTokenProvider(token()), engine: engine())
+            .analyzeOnly { e in if case let .log(s) = e { print(s) } }
+        if let d = a.dcf { print("\n== Kontrola DCF\n" + d.logLines.joined(separator: "\n")) }
+        if let q = a.quarter { print("\n" + q.markdown()) }
+        for n in a.notes { print("note: \(n)") }
+
+    case "quarters":
+        guard let path = opt("--companyfacts") else { print("--companyfacts required"); exit(2) }
+        let cf = try CompanyFactsParser.parse(Data(contentsOf: URL(fileURLWithPath: path)),
+                                              forms: CompanyFactsParser.annualAndQuarterlyForms)
+        let figures = QuarterlyFigures.compute(facts: cf.facts)
+        print(figures.markdown(maxColumns: 8))
+        print("\n" + figures.promptTable())
+        let target = CompanySnapshot.compute(ticker: opt("--ticker") ?? "TARGET", name: cf.entityName ?? "Company", facts: cf.facts)
+        var peers: [CompanySnapshot] = []
+        for pair in (opt("--peers-facts") ?? "").split(separator: ",") {
+            let kv = pair.split(separator: "=", maxSplits: 1).map(String.init)
+            guard kv.count == 2 else { continue }
+            let p = try CompanyFactsParser.parse(Data(contentsOf: URL(fileURLWithPath: kv[1])), forms: CompanyFactsParser.annualAndQuarterlyForms)
+            peers.append(CompanySnapshot.compute(ticker: kv[0], name: p.entityName ?? kv[0], facts: p.facts))
         }
+        for s in [target] + peers {
+            func m(_ v: Double?) -> String { v.map { String(format: "%.0f", $0 / 1e6) } ?? "—" }
+            print("\(s.ticker.padding(toLength: 6, withPad: " ", startingAt: 0)) LTM \(s.ltmEnd ?? "—")(\(s.ltmQuarters)q) rev \(m(s.revenue)) "
+                  + "ebitda \(m(s.ebitda)) ni \(m(s.netIncome)) fcf \(m(s.freeCashFlow)) netDebt \(m(s.netDebt)) "
+                  + "shares \(s.shares.map { String(format: "%.1fM", $0 / 1e6) } ?? "—") growth \(s.revenueGrowth.map { String(format: "%.1f%%", $0 * 100) } ?? "—")")
+        }
+        if let out = opt("--emit-comps") {
+            let req = CompsSheet.requests(sheetId: 1, target: target, peers: peers, hasDCF: true)
+            try JSONSerialization.data(withJSONObject: req, options: [.prettyPrinted]).write(to: URL(fileURLWithPath: out))
+        }
+
+    case "run":
+        let ticker = require(tickerArg(), "ticker (finfill run NVDA)")
+        let ua = require(value("--ua", "ua"), "SEC User-Agent", "ua")
+        let sheet = require(value("--sheet", "sheet"), "sešit (--sheet ID|URL)", "sheet")
         var cfg = FinFillPipeline.Config(ticker: ticker, secUserAgent: ua, spreadsheet: sheet, mapping: try loadMapping())
         cfg.dryRun = !flag("--write")
         cfg.overwrite = flag("--overwrite")
         cfg.fiscalYear = opt("--fy").flatMap(Int.init)
-        if let l = opt("--language") { cfg.summaryOptions.language = l }
-        let report = try await FinFillPipeline(config: cfg, tokens: StaticTokenProvider(token), engine: engine()).run { e in
+        applyAnalyses(&cfg)
+        let report = try await FinFillPipeline(config: cfg, tokens: StaticTokenProvider(token()), engine: engine()).run { e in
             if case let .log(s) = e { print(s) }
         }
         for c in report.newColumns { print("new column \(c.sheet)!\(c.column) for \(c.year), copied from \(c.sourceColumn), clearing rows \(c.clearRows)") }
@@ -127,18 +210,50 @@ do {
         if let s = report.summary { print("\n" + s.markdown(company: report.filing.company)) }
 
     case "new":
-        guard let ticker = opt("--ticker"), let ua = opt("--ua"), let token = opt("--token") else {
-            print("--ticker, --ua, --token required"); exit(2)
-        }
+        let ticker = require(tickerArg(), "ticker (finfill new AMD)")
+        let ua = require(value("--ua", "ua"), "SEC User-Agent", "ua")
         var cfg = FinFillPipeline.Config(ticker: ticker, secUserAgent: ua, spreadsheet: "", mapping: try TemplateMapping.bundledUniversal())
         cfg.fiscalYear = opt("--fy").flatMap(Int.init)
-        if let l = opt("--language") { cfg.summaryOptions.language = l }
-        let r = try await FinFillPipeline(config: cfg, tokens: StaticTokenProvider(token), engine: engine())
+        applyAnalyses(&cfg)
+        let r = try await FinFillPipeline(config: cfg, tokens: StaticTokenProvider(token()), engine: engine())
             .createWorkbook(template: try SpreadsheetTemplate.bundledUniversal()) { e in if case let .log(s) = e { print(s) } }
+        if let d = r.analysis?.dcf { print("\n== Kontrola DCF\n" + d.logLines.joined(separator: "\n")) }
         print("\n\(r.title): \(r.url.absoluteString)")
 
+    case "config":
+        switch args.dropFirst().first {
+        case "set":
+            guard args.count >= 4 else { print("finfill config set <klíč> <hodnota>"); exit(2) }
+            let key = args[2]
+            guard CLISettings.keys.contains(where: { $0.key == key }) else {
+                print("Neznámý klíč \(key). Klíče: " + CLISettings.keys.map(\.key).joined(separator: ", ")); exit(2)
+            }
+            settings.set(key, args[3...].joined(separator: " "))
+            try settings.save()
+        case "unset":
+            guard args.count >= 3 else { print("finfill config unset <klíč>"); exit(2) }
+            settings.values[args[2]] = nil
+            try settings.save()
+        case "peers":
+            guard args.count >= 3 else { print("finfill config peers NVDA AMD,AVGO,INTC   (bez seznamu = smazat)"); exit(2) }
+            let list = FinFillPipeline.normalizedPeers([args[3...].joined(separator: ",")], excluding: args[2]).joined(separator: ",")
+            settings.setPeers(args[2], list)
+            try settings.save()
+        default:
+            break
+        }
+        print(settings.describe())
+
     default:
-        print("usage: finfill local --html FILE [...] | finfill run --ticker T --ua UA --sheet ID --token TOKEN [--write]")
+        print("""
+        usage:
+          finfill new AMD                    nový sešit ze šablony (9 let) + analýzy
+          finfill run NVDA [--write]         výkazy do sešitu z nastavení (bez --write náhled)
+          finfill analyze NVDA               jen Citlivost / Comps / Kvartály
+          finfill quarters --companyfacts F  offline kvartály a LTM
+          finfill local --html F             offline 10-K
+          finfill config                     nastavení (ua, token_command, sheet, llm, peers…)
+        """)
     }
 } catch {
     print("error: \(error.localizedDescription)")

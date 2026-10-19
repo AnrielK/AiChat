@@ -9,7 +9,7 @@ public struct FinFillView: View {
     @State private var showPicker = false
     @FocusState private var focused: Field?
 
-    enum Field { case ticker, sheet, userAgent, year }
+    enum Field { case ticker, sheet, userAgent, year, peers }
 
     public init(tokens: AccessTokenProvider, engine: LLMEngine?, mapping: TemplateMapping? = nil) {
         _model = State(initialValue: FinFillViewModel(tokens: tokens, engine: engine, mapping: mapping))
@@ -19,9 +19,12 @@ public struct FinFillView: View {
         Form {
             sourceSection
             optionsSection
+            analysesSection
             actionSection
             if let w = model.newWorkbook { newWorkbookSection(w) }
+            if let a = model.analysis { analysisSections(a) }
             if let r = model.report { reportSections(r) }
+            quarterSection
             summarySection
             logSection
         }
@@ -101,6 +104,21 @@ public struct FinFillView: View {
         }
     }
 
+    private var analysesSection: some View {
+        Section {
+            Toggle("Citlivost WACC × TGR + kontrola DCF", isOn: $model.sensitivity)
+            Toggle("Kvartály z 10-Q + earnings review", isOn: $model.quarterly)
+            TextField("Peery pro Comps, např. AMD, AVGO, INTC", text: $model.peersText)
+                .textInputAutocapitalization(.characters)
+                .autocorrectionDisabled()
+                .focused($focused, equals: .peers)
+        } header: {
+            Text("Analýzy")
+        } footer: {
+            Text("Při zápisu (i v novém sešitu) vzniknou listy Citlivost, Comps a Kvartály. Comps: LTM ze SEC, cena živě přes GOOGLEFINANCE, multiply a implikovaná cena z mediánu peerů. Kvartály: posledních 8 kvartálů, YoY a QoQ; konsenzus analytiků v SEC není. Text earnings review píše model z Nastavení, když je zapnutý „Souhrn modelem“.")
+        }
+    }
+
     private var actionSection: some View {
         Section {
             Button {
@@ -126,6 +144,14 @@ public struct FinFillView: View {
                 Label("Nový sešit ze šablony (9 let)", systemImage: "doc.badge.plus")
             }
             .disabled(model.isRunning || model.ticker.isEmpty)
+
+            Button {
+                focused = nil
+                Task { await model.analyze() }
+            } label: {
+                Label("Jen analýzy do sešitu", systemImage: "chart.line.uptrend.xyaxis")
+            }
+            .disabled(model.isRunning || model.ticker.isEmpty || model.spreadsheet.isEmpty || !model.hasAnalyses)
         } footer: {
             if model.isRunning { ProgressView(model.status) }
             else if let e = model.errorText { Text(e).foregroundStyle(.red) }
@@ -266,6 +292,76 @@ public struct FinFillView: View {
     }
 
     @ViewBuilder
+    private func analysisSections(_ a: AnalysisReport) -> some View {
+        if let dcf = a.dcf {
+            Section {
+                ForEach(dcf.findings) { f in
+                    HStack(alignment: .firstTextBaseline) {
+                        severityIcon(f.severity)
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(f.title)
+                            Text(f.detail).font(.caption).foregroundStyle(.secondary)
+                        }
+                    }
+                }
+            } header: {
+                Text("Kontrola DCF")
+            } footer: {
+                Text(a.sensitivityWritten ? "List Citlivost: cena pro WACC × TGR, potenciál a stejné kontroly jako živé vzorce." : "")
+            }
+        }
+
+        if let t = a.target, !a.peers.isEmpty || !a.peerErrors.isEmpty {
+            Section {
+                if !a.peers.isEmpty {
+                    Text(LocalizedStringKey(CompsSheet.summary(target: t, peers: a.peers))).font(.callout)
+                }
+                ForEach(a.peers) { p in
+                    HStack {
+                        Text(p.ticker).font(.subheadline.monospaced())
+                        Text(p.name).font(.caption).foregroundStyle(.secondary).lineLimit(1)
+                        Spacer()
+                        Text(p.ltmEnd.map { "LTM \($0)" } ?? "—").font(.caption2).foregroundStyle(.secondary)
+                    }
+                }
+                ForEach(a.peerErrors, id: \.self) { e in
+                    Text(e).font(.caption).foregroundStyle(.orange)
+                }
+            } header: {
+                Text("Comps · \(t.ticker) vs. \(a.peers.count) peerů")
+            } footer: {
+                Text(a.compsWritten ? "Multiply, kvartily a implikovaná cena jsou na listu Comps (cena živě z GOOGLEFINANCE)." : "List Comps se nezapsal.")
+            }
+        }
+
+        if !a.notes.isEmpty {
+            Section("Poznámky k analýzám") {
+                ForEach(a.notes, id: \.self) { n in Text(n).font(.caption) }
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func severityIcon(_ s: DCFReview.Severity) -> some View {
+        switch s {
+        case .ok: Image(systemName: "checkmark.circle.fill").foregroundStyle(.green)
+        case .info: Image(systemName: "info.circle").foregroundStyle(.blue)
+        case .warning: Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(.orange)
+        case .error: Image(systemName: "xmark.octagon.fill").foregroundStyle(.red)
+        }
+    }
+
+    @ViewBuilder
+    private var quarterSection: some View {
+        if let q = model.quarterMarkdown {
+            Section("Kvartál") {
+                Text(LocalizedStringKey(q)).textSelection(.enabled).font(.callout)
+                ShareLink(item: q)
+            }
+        }
+    }
+
+    @ViewBuilder
     private func checkIcon(_ status: CheckResult.Status) -> some View {
         switch status {
         case .passed: Image(systemName: "checkmark.circle.fill").foregroundStyle(.green)
@@ -375,7 +471,12 @@ struct SpreadsheetPickerView: View {
 @available(iOS 17.0, *)
 @MainActor @Observable
 final class FinFillViewModel {
-    var ticker = UserDefaults.standard.string(forKey: "finfill.ticker") ?? "NVDA" { didSet { invalidate() } }
+    var ticker = UserDefaults.standard.string(forKey: "finfill.ticker") ?? "NVDA" {
+        didSet {
+            invalidate()
+            if ticker != oldValue { peersText = Self.savedPeers(for: ticker) }
+        }
+    }
     var spreadsheet = UserDefaults.standard.string(forKey: "finfill.sheet") ?? "" {
         didSet {
             if spreadsheet != oldValue { spreadsheetName = nil }
@@ -396,6 +497,33 @@ final class FinFillViewModel {
     /// Nový sešit: výkazy a Segments od aktuálního roku (vlevo) ke starším (doprava).
     var newestFirst = UserDefaults.standard.object(forKey: "finfill.newestFirst") as? Bool ?? true {
         didSet { UserDefaults.standard.set(newestFirst, forKey: "finfill.newestFirst") }
+    }
+
+    /// List Citlivost + kontrola DCF.
+    var sensitivity = UserDefaults.standard.object(forKey: "finfill.sensitivity") as? Bool ?? true {
+        didSet { UserDefaults.standard.set(sensitivity, forKey: "finfill.sensitivity") }
+    }
+    /// List Kvartály + earnings review posledního 10-Q.
+    var quarterly = UserDefaults.standard.object(forKey: "finfill.quarterly") as? Bool ?? true {
+        didSet { UserDefaults.standard.set(quarterly, forKey: "finfill.quarterly") }
+    }
+    /// Peery pro Comps – pamatují se pro každý ticker zvlášť.
+    var peersText = FinFillViewModel.savedPeers(for: UserDefaults.standard.string(forKey: "finfill.ticker") ?? "NVDA") {
+        didSet { UserDefaults.standard.set(peersText, forKey: Self.peersKey(ticker)) }
+    }
+    var analysis: AnalysisReport?
+    var quarterMarkdown: String?
+
+    var hasAnalyses: Bool {
+        sensitivity || quarterly || !FinFillPipeline.normalizedPeers([peersText], excluding: ticker).isEmpty
+    }
+
+    static func peersKey(_ ticker: String) -> String {
+        "finfill.peers." + ticker.trimmingCharacters(in: .whitespaces).uppercased()
+    }
+
+    static func savedPeers(for ticker: String) -> String {
+        UserDefaults.standard.string(forKey: peersKey(ticker)) ?? ""
     }
 
     var isRunning = false
@@ -423,6 +551,8 @@ final class FinFillViewModel {
         report = nil
         summaryMarkdown = nil
         newWorkbook = nil
+        analysis = nil
+        quarterMarkdown = nil
     }
 
     func selectSpreadsheet(id: String, name: String) {
@@ -447,6 +577,9 @@ final class FinFillViewModel {
         c.summaryOptions.language = language
         c.segments = segments
         c.newestFirst = newestFirst
+        c.sensitivity = sensitivity
+        c.quarterly = quarterly
+        c.peers = [peersText]
         return c
     }
 
@@ -467,6 +600,8 @@ final class FinFillViewModel {
     func preview() async {
         report = nil
         summaryMarkdown = nil
+        analysis = nil
+        quarterMarkdown = nil
         await run {
             let cfg = try self.config(dryRun: true)
             let pipeline = FinFillPipeline(config: cfg, tokens: self.tokens, engine: nil)
@@ -489,6 +624,7 @@ final class FinFillViewModel {
             self.selectSpreadsheet(id: w.spreadsheetID, name: w.title)
             self.newWorkbook = w
             self.summaryMarkdown = w.summary?.markdown(company: w.filing.company)
+            self.show(w.analysis)
         }
     }
 
@@ -501,7 +637,27 @@ final class FinFillViewModel {
             let r = try await pipeline.run(filing: previous.filing) { e in Task { @MainActor in self.handle(e) } }
             self.report = r
             self.summaryMarkdown = r.summary?.markdown(company: r.filing.company)
+            self.show(r.analysis)
         }
+    }
+
+    /// Jen Citlivost, Comps a Kvartály do vybraného sešitu – výkazy se nezapisují.
+    func analyze() async {
+        let filing = report?.filing
+        analysis = nil
+        quarterMarkdown = nil
+        await run {
+            let cfg = try self.config(dryRun: false)
+            let pipeline = FinFillPipeline(config: cfg, tokens: self.tokens, engine: self.summarize ? self.engine : nil)
+            let (_, a) = try await pipeline.analyzeOnly(filing: filing) { e in Task { @MainActor in self.handle(e) } }
+            self.show(a)
+        }
+    }
+
+    private func show(_ a: AnalysisReport?) {
+        guard let a, !a.isEmpty else { analysis = nil; quarterMarkdown = nil; return }
+        analysis = a
+        quarterMarkdown = a.quarter?.markdown()
     }
 
     private func run(_ work: @escaping () async throws -> Void) async {

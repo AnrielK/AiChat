@@ -10,6 +10,7 @@ public extension FinFillPipeline {
         public let written: Int
         public let summary: Summarizer.Result?
         public let segmentGroups: [SegmentGroup]
+        public var analysis: AnalysisReport? = nil
     }
 
     /// Creates a new Google Sheets workbook from `template` (statements + DCF + WACC with formulas
@@ -88,9 +89,13 @@ public extension FinFillPipeline {
             log(.log("List „\(SegmentSheet.title)“: \(groups.map { "\($0.title) \($0.lines.count)" }.joined(separator: ", "))"))
         }
 
-        // 3) Summary of the latest 10-K.
+        // 3) Citlivost + kontrola DCF, Comps, Kvartály.
+        let analysis = await runAnalyses(filing: filing, sheets: sheets, log: log)
+
+        // 4) Summary of the latest 10-K.
         let summary = try await summarize(filing: filing, sheets: sheets, write: true, log: log)
         return NewWorkbookReport(spreadsheetID: created.spreadsheetID, url: created.url, title: name, filing: filing,
-                                 years: plan.years, written: cells.count, summary: summary, segmentGroups: groups)
+                                 years: plan.years, written: cells.count, summary: summary, segmentGroups: groups,
+                                 analysis: analysis)
     }
 }

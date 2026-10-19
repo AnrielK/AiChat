@@ -10,6 +10,9 @@ public struct FilingSection: Sendable, Identifiable {
 
 public enum FilingSections {
     public static let defaultItems = ["1", "1A", "7", "7A"]
+    /// 10-Q: Part I Item 2 = MD&A (Part II Item 2 je krátký – vybere se delší výskyt).
+    public static let quarterlyItems = ["2"]
+    public static let quarterlyTitles = ["2": "Management's Discussion and Analysis", "3": "Market Risk"]
 
     static let titles: [String: String] = [
         "1": "Business", "1A": "Risk Factors", "1B": "Unresolved Staff Comments", "1C": "Cybersecurity",
@@ -20,7 +23,8 @@ public enum FilingSections {
 
     /// Every "Item X." heading appears twice (table of contents + body). For each item we take
     /// the occurrence that yields the longest section, which is the body.
-    public static func extract(plainText text: String, items: [String] = defaultItems) -> [FilingSection] {
+    public static func extract(plainText text: String, items: [String] = defaultItems,
+                               titleOverrides: [String: String] = [:]) -> [FilingSection] {
         let ns = text as NSString
         let re = try! NSRegularExpression(
             pattern: #"(?m)^\s*Item\s+(\d{1,2}[A-C]?)\s*[\.:—–-]"#, options: [.caseInsensitive])
@@ -36,7 +40,7 @@ public enum FilingSections {
         return items.compactMap { item in
             guard let r = best[item], r.end - r.start > 500 else { return nil }
             let body = ns.substring(with: NSRange(location: r.start, length: r.end - r.start))
-            return FilingSection(item: item, title: titles[item] ?? "Item \(item)", text: body)
+            return FilingSection(item: item, title: titleOverrides[item] ?? titles[item] ?? "Item \(item)", text: body)
         }
     }
 

@@ -14,6 +14,10 @@ public struct PreparedFiling: Sendable {
     public var olderFilings: [SECClient.Filing] = []
     /// Dimensional revenue facts of this filing (segments, markets, regions).
     public var segmentFacts: [Fact] = []
+    /// companyfacts z 10-Q (kvartály, LTM pro Comps). Roční fakta jsou ve `facts`.
+    public var interimFacts: [Fact] = []
+    /// 10-Q, nejnovější první (earnings review posledního kvartálu).
+    public var quarterlyFilings: [SECClient.Filing] = []
 
     /// Offline: from a downloaded 10-K (.htm, inline XBRL) and optionally a companyfacts JSON.
     public static func local(html: String, companyFacts: Data? = nil) throws -> PreparedFiling {
@@ -74,6 +78,12 @@ public struct FinFillPipeline: Sendable {
         /// Sheet "Segments": revenue by segment / market / region, YoY change, share (rebuilt on write).
         public var segments = true
         public var summaryOptions = Summarizer.Options()
+        /// List „Citlivost“ (WACC × TGR) a kontrola DCF po zápisu.
+        public var sensitivity = true
+        /// Peery pro list „Comps“ (tickery); prázdné = bez Comps.
+        public var peers: [String] = []
+        /// List „Kvartály“ z 10-Q + earnings review posledního kvartálu modelem.
+        public var quarterly = false
 
         public init(ticker: String, secUserAgent: String, spreadsheet: String, mapping: TemplateMapping) {
             self.ticker = ticker
@@ -99,6 +109,8 @@ public struct FinFillPipeline: Sendable {
         public let written: Int
         public let summary: Summarizer.Result?
         public var segmentGroups: [SegmentGroup] = []
+        /// Citlivost + kontrola DCF, Comps, Kvartály (jen při zápisu).
+        public var analysis: AnalysisReport? = nil
         public var allChecksPassed: Bool { checks.allSatisfy(\.passed) }
     }
 
@@ -118,10 +130,15 @@ public struct FinFillPipeline: Sendable {
         let sec = SECClient(userAgent: config.secUserAgent)
         log(.log("SEC: looking up \(config.ticker)…"))
         let (cik, name) = try await sec.cik(forTicker: config.ticker)
-        let filings = try await sec.filings(cik: cik, forms: ["10-K", "10-K/A"]).filter { $0.form == "10-K" }
+        let allFilings = try await sec.filings(cik: cik, forms: ["10-K", "10-K/A", "10-Q"])
+        let filings = allFilings.filter { $0.form == "10-K" }
 
         async let factsData = sec.companyFactsData(cik: cik)
-        let cf = try CompanyFactsParser.parse(try await factsData)
+        // Jedno parsování pro roční i kvartální údaje; do `facts` jdou jen roční (jako dřív).
+        let cfAll = try CompanyFactsParser.parse(try await factsData, forms: CompanyFactsParser.annualAndQuarterlyForms)
+        let cf = (facts: cfAll.facts.filter { CompanyFactsParser.annualForms.contains($0.form ?? "") },
+                  annualReports: cfAll.annualReports)
+        let interim = cfAll.facts.filter { ($0.form ?? "").hasPrefix("10-Q") }
 
         let filing: SECClient.Filing
         if let fy = config.fiscalYear {
@@ -140,12 +157,14 @@ public struct FinFillPipeline: Sendable {
         store.add(doc.facts)
         let fy = cf.annualReports[filing.accessionNumber] ?? doc.fiscalYear ?? Int(filing.reportDate.prefix(4))!
         let period = FiscalPeriod(fiscalYear: fy, endDate: filing.reportDate, accession: filing.accessionNumber)
-        log(.log("Facts: \(cf.facts.count) companyfacts + \(doc.facts.count) inline XBRL, FY\(fy)"))
+        log(.log("Facts: \(cf.facts.count) companyfacts + \(doc.facts.count) inline XBRL, FY\(fy) (+ \(interim.count) z 10-Q)"))
         return PreparedFiling(company: name, ticker: config.ticker, facts: store, period: period,
                               prior: PreparedFiling.priorPeriod(store, before: period),
                               filingHTML: html, documentURL: filing.documentURL, cik: cik,
                               olderFilings: filings.filter { $0.reportDate < filing.reportDate },
-                              segmentFacts: SegmentExtractor.revenueFacts(doc.facts))
+                              segmentFacts: SegmentExtractor.revenueFacts(doc.facts),
+                              interimFacts: interim,
+                              quarterlyFilings: allFilings.filter { $0.form == "10-Q" })
     }
 
     public func run(filing prepared: PreparedFiling? = nil,
@@ -210,10 +229,25 @@ public struct FinFillPipeline: Sendable {
             }
         }
 
-        // 6) Summary
+        // 6) Analýzy: Citlivost + kontrola DCF, Comps, Kvartály (po zápisu – DCF počítá z nových čísel).
+        var analysis: AnalysisReport?
+        if !config.dryRun {
+            analysis = await runAnalyses(filing: filing, sheets: sheets, log: log)
+        } else {
+            var planned: [String] = []
+            if config.sensitivity { planned.append("Citlivost + kontrola DCF") }
+            let peers = Self.normalizedPeers(config.peers, excluding: filing.ticker ?? config.ticker)
+            if !peers.isEmpty { planned.append("Comps (\(peers.joined(separator: ", ")))") }
+            if config.quarterly { planned.append("Kvartály (\(filing.interimFacts.isEmpty ? "bez dat 10-Q" : "10-Q"))") }
+            if !planned.isEmpty { log(.log("Při zápisu se vytvoří: " + planned.joined(separator: " · "))) }
+        }
+
+        // 7) Summary
         let summary = try await summarize(filing: filing, sheets: sheets, write: !config.dryRun, log: log)
-        return Report(filing: filing, rows: rows, checks: checks, backtest: backtest, plan: plan,
-                      newColumns: sheetPlan.newColumns, written: written, summary: summary, segmentGroups: segmentGroups)
+        var report = Report(filing: filing, rows: rows, checks: checks, backtest: backtest, plan: plan,
+                            newColumns: sheetPlan.newColumns, written: written, summary: summary, segmentGroups: segmentGroups)
+        report.analysis = analysis
+        return report
     }
 
     func backtest(prior: FiscalPeriod, filing: PreparedFiling, sheets: GoogleSheetsClient) async throws -> [ColumnDifference] {

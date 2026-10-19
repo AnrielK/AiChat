@@ -37,6 +37,9 @@ počítané kódem z SEC a zapsané jako vzorce. V obrazovce 10-K → Sheets nov
   s číslem, popisem (kdy byl sešit upravený) a „doporučeno“ u první; klepnutí možnost označí a odešle,
   ostatní zešednou. V textu zprávy je jako blok ```aichat-choice s JSONem (`ChoicePrompt`), takže se uloží
   s konverzací bez změny databáze. Napsat číslo možnosti funguje dál.
+- **Výběr se potvrzuje odesláním**: klepnutí na možnost ji jen označí (kroužek → fajfka, druhé klepnutí
+  označení zruší) a nad polem pro zprávu se ukáže štítek „… · Odeslat pro potvrzení“ s křížkem.
+  Tlačítko Odeslat pošle příkaz označené možnosti; rozepsaný text a přílohy zůstanou v poli.
 - CLI s nastavením: stačí `finfill new AMD` / `finfill run NVDA --write` / `finfill analyze NVDA`. User-Agent,
   token (nebo `token_command`), sešit, model, jazyk, kvartály a peery pro každý ticker se ukládají přes
   `finfill config` do `~/.config/finfill/config.json`; přepínače mají přednost.

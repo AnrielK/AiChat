@@ -320,7 +320,7 @@ struct FinFillCommandProvider: ChatProvider {
             header: "Sešit",
             question: "Na Disku už \(files.count == 1 ? "je sešit" : "jsou sešity") s \(ticker) v názvu. Aktualizovat, nebo založit nový?",
             options: options,
-            footnote: "Aktualizace zapíše poslední 10-K (vyplněné buňky nepřepíše) a obnoví Citlivost, Comps a Kvartály. Můžeš taky napsat číslo možnosti.")
+            footnote: "Aktualizace zapíše poslední 10-K (vyplněné buňky nepřepíše) a obnoví Citlivost, Comps a Kvartály. Označ možnost a potvrď odesláním, nebo napiš její číslo.")
         PendingChoice.save(options.map(\.command))
         return prompt.markdownBlock
     }
@@ -329,7 +329,7 @@ struct FinFillCommandProvider: ChatProvider {
     static func offerSheets(for command: FinFillCommand, ticker: String, current: String, currentID: String,
                             allowCurrent: Bool = true) async -> String {
         var options: [ChoicePrompt.Option] = []
-        var note = "Můžeš taky napsat číslo možnosti."
+        var note = "Označ možnost a potvrď odesláním, nebo napiš její číslo."
         do {
             let files = try await GoogleDriveClient(tokens: GoogleTokenProvider()).spreadsheets(search: ticker, limit: 50)
             for f in SpreadsheetMatch.candidates(files, ticker: ticker) where f.id != currentID {

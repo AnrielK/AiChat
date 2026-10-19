@@ -99,6 +99,9 @@ struct ChatBottomBar: View {
 
     private var composer: some View {
         VStack(alignment: .leading, spacing: 0) {
+            if let choice = chat.selectedChoice {
+                choiceChip(choice)
+            }
             if !chat.attachments.isEmpty || chat.loadingAttachments > 0 {
                 attachmentStrip
             }
@@ -119,6 +122,40 @@ struct ChatBottomBar: View {
         .frame(minHeight: 50)
         .glassEffect(.regular.interactive(), in: .rect(cornerRadius: 25))
         .glassEffectID("composer", in: glass)
+    }
+
+    /// Možnost označená v kartě s výběrem – odešle se tlačítkem Odeslat.
+    private func choiceChip(_ choice: ChatViewModel.ChoiceSelection) -> some View {
+        HStack(spacing: 8) {
+            Image(systemName: "checkmark.circle.fill")
+                .foregroundStyle(Color.accentColor)
+            VStack(alignment: .leading, spacing: 1) {
+                Text(choice.label)
+                    .font(.caption.weight(.medium))
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                Text("Odeslat pro potvrzení")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+            }
+            Spacer(minLength: 0)
+            Button {
+                withAnimation(.snappy) { chat.clearChoice() }
+            } label: {
+                Image(systemName: "xmark.circle.fill")
+                    .font(.body)
+                    .foregroundStyle(.secondary)
+                    .symbolRenderingMode(.hierarchical)
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("Zrušit výběr")
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 8)
+        .background(.fill.tertiary, in: .rect(cornerRadius: 14))
+        .padding(.horizontal, 10)
+        .padding(.top, 10)
+        .transition(.scale(scale: 0.9).combined(with: .opacity))
     }
 
     /// Přiložit fotky nebo soubory.

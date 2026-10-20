@@ -16,6 +16,16 @@
   je karta – ticker tučně a jméno firmy šedě vlevo, cena („766,48 US$“) a zelená/červená změna („+0,4 %“,
   u výnosů „+4 bb“) vpravo, šipka otevře detail na Yahoo Finance. Jména firem z Yahoo (longName).
   V textu zprávy jako blok ```aichat-quotes s JSONem (`QuoteBoard` ve FinFillCore); CLI dál tiskne tabulky.
+- **Kalendář dne** (čas Praha i ET): ekonomická data USA s prognózou a minulou hodnotou, projevy (🎙 Fed,
+  ECB, BoE…) a důležité události ostatních zemí z ForexFactory; aukce státních dluhopisů (TreasuryDirect);
+  dnešní výsledky největších firem a watchlistu s časem a konsenzem EPS (Nasdaq). O víkendu kalendář pondělí.
+  Model ho používá v oddílu „Dnes“; co se nenačte, vypíše se v „Nenačteno“.
+- **Kalendář jako karty** (stejný styl jako kurzy, `ListBoard` / ```aichat-list): *Ekonomika a projevy* –
+  událost a čas (Praha · ET) vlevo, prognóza a „minule …“ vpravo, barevná tečka podle dopadu; *Aukce
+  dluhopisů*; *Výsledky firem* – ticker a firma s tržní kapitalizací vlevo, „EPS $0.82“ a ☀︎ před otevřením /
+  ☾ po zavření vpravo, nejdřív ranní, šipka na Yahoo Finance. Tabulka se už neusekává na šířku telefonu.
+- Zdroje: odkaz s závorkou nebo mezerou v URL se zobrazoval jako holý text – adresa se teď kóduje.
+- **Změna i v jednotkách ceny**: na kartě „+2,96 · +1,4 %“, u indexů body, u výnosů dál bazické body.
 - CLI: `finfill market-brief [NVDA,AMD]`. Testy: 4 nové (kurzy, RSS/Atom, okno zpráv, prompt), celkem 56.
 
 ---

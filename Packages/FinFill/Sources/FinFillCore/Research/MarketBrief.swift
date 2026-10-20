@@ -178,10 +178,13 @@ public struct MarketBrief: Sendable {
     public let quotes: [Quote]
     public let headlines: [Headline]
     public let failed: [String]
+    /// Dnešní ekonomická data, projevy, výsledky a aukce (nil = nenačteno).
+    public var calendar: MarketCalendar? = nil
     public let generated: Date
 
-    public init(quotes: [Quote], headlines: [Headline], failed: [String], generated: Date) {
+    public init(quotes: [Quote], headlines: [Headline], failed: [String], generated: Date, calendar: MarketCalendar? = nil) {
         self.quotes = quotes; self.headlines = headlines; self.failed = failed; self.generated = generated
+        self.calendar = calendar
     }
 
     static let browserUA = "Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.0 Mobile/15E148 Safari/604.1"
@@ -231,7 +234,11 @@ public struct MarketBrief: Sendable {
             for await (f, list) in group { if let list { items += list } else { failed.append(f.name) } }
         }
         let now = Date()
-        return MarketBrief(quotes: quotes, headlines: select(items, now: now), failed: failed.sorted(), generated: now)
+        log("Kalendář dne…")
+        var calFailed: [String] = []
+        let calendar = await MarketCalendar.load(now: now, watchlist: watchlist, session: session, failed: &calFailed)
+        return MarketBrief(quotes: quotes, headlines: select(items, now: now), failed: (failed + calFailed).sorted(),
+                           generated: now, calendar: calendar)
     }
 
     // MARK: - Výstup
@@ -244,7 +251,9 @@ public struct MarketBrief: Sendable {
         case "^VIX": v = String(format: "%.2f", q.last)
         default: v = q.last >= 1000 ? String(format: "%.0f", q.last) : String(format: "%.2f", q.last)
         }
-        return (v, String(format: "%+.2f %%", q.change * 100))
+        let absChange = q.last - q.previous
+        let a = abs(absChange) >= 100 ? String(format: "%+.0f", absChange) : String(format: absChange.magnitude < 0.01 ? "%+.4f" : "%+.2f", absChange)
+        return (v, "\(a) (\(String(format: "%+.2f %%", q.change * 100)))")
     }
 
     /// Den posledního zavření akciového trhu (podle S&P 500).
@@ -289,7 +298,7 @@ public struct MarketBrief: Sendable {
             "[\(i + 1)] \(h.date.map { df.string(from: $0) + " ET" } ?? "") \(h.source): \(h.title)"
                 + (h.summary.isEmpty ? "" : " — \(h.summary.prefix(200))")
         }.joined(separator: "\n")
-        return "MARKET DATA:\n\(q)\n\nHEADLINES (newest first):\n\(h)"
+        return "MARKET DATA:\n\(q)\n\n\(calendar?.promptData() ?? "TODAY'S CALENDAR: (none loaded)")\n\nHEADLINES (newest first):\n\(h)"
     }
 
     public static func prompt(data: String, language: String) -> String {
@@ -309,7 +318,9 @@ public struct MarketBrief: Sendable {
         ## Co hýbe trhem
         - 5–8 bullets, most important first, each max 25 words with [n] citations; group makro/Fed first, then companies, then the rest
         ## Dnes
-        - 2–4 bullets: futures now, earnings or data due today ONLY if a headline mentions them
+        - 3–5 bullets: futures now; the most market-moving items from TODAY'S CALENDAR (Fed and other central-bank speeches, \
+        high-impact US data with forecast vs previous, Treasury auctions, the biggest earnings with time and consensus EPS), \
+        with Prague times; if the calendar is empty, only what headlines mention
         ## Na co dát pozor
         - 1–2 bullets: the key risk or question for today's session
 
@@ -324,7 +335,11 @@ public struct MarketBrief: Sendable {
             .compactMap { Range($0.range(at: 1), in: text).flatMap { Int(text[$0]) } } ?? [])
         let list = headlines.enumerated().filter { cited.contains($0.offset + 1) }
         guard !list.isEmpty else { return "" }
-        return "**Zdroje:** " + list.map { "[\($0.offset + 1)] [\($0.element.source)](\($0.element.link))" }.joined(separator: " · ") + "\n"
+        // Závorky a mezery v URL by markdown odkaz rozbily (zobrazil by se holý text).
+        func safe(_ u: String) -> String {
+            u.replacingOccurrences(of: " ", with: "%20").replacingOccurrences(of: "(", with: "%28").replacingOccurrences(of: ")", with: "%29")
+        }
+        return "**Zdroje:** " + list.map { "[\($0.offset + 1)] [\($0.element.source)](\(safe($0.element.link)))" }.joined(separator: " · ") + "\n"
     }
 
     /// Karty kurzů pro chat (```aichat-quotes), jedna na skupinu.
@@ -370,12 +385,14 @@ extension ResearchSkills {
             let text = LLMOutput.clean(try await writer.write(MarketBrief.prompt(data: brief.promptData(), language: options.language),
                                                               maxTokens: 1_400))
             md += text + "\n\n" + brief.sourcesMarkdown(for: text) + "\n"
+            if let cal = brief.calendar { md += cal.markdown(today: cal.day == MarketCalendar.nyDay(brief.generated), cards: cards) }
             md += "## Kurzy\n\n" + brief.quotesBlock(cards: cards)
         } else {
+            if let cal = brief.calendar { md += cal.markdown(today: cal.day == MarketCalendar.nyDay(brief.generated), cards: cards) }
             md += brief.plainMarkdown(cards: cards)
         }
         if !brief.failed.isEmpty { md += "\n_Nenačteno: \(brief.failed.joined(separator: ", "))._\n" }
-        md += "\n_Kurzy: Yahoo Finance (zavírací ceny, futures aktuálně). Zprávy (RSS): CNBC, Investing.com, Nasdaq, Google News, MarketWatch, Yahoo Finance (watchlist), Federal Reserve. Není to investiční doporučení._\n"
+        md += "\n_Kurzy: Yahoo Finance (zavírací ceny, futures aktuálně). Zprávy (RSS): CNBC, Investing.com, Nasdaq, Google News, MarketWatch, Yahoo Finance (watchlist), Federal Reserve. Kalendář: ForexFactory, Nasdaq, TreasuryDirect. Není to investiční doporučení._\n"
         return md
     }
 }
@@ -391,6 +408,8 @@ public struct QuoteBoard: Codable, Sendable, Equatable {
         public var unit: String?           // „US$“, „%“
         public var change: Double          // podíl (0.014 = +1,4 %)
         public var changeBps: Double?      // výnosy: změna v bazických bodech
+        /// Změna v jednotkách ceny (+2,96 US$, +27,6 bodu).
+        public var changeAbs: Double?
         public var url: String?
 
         init(_ q: MarketBrief.Quote) {
@@ -409,13 +428,14 @@ public struct QuoteBoard: Codable, Sendable, Equatable {
             unit = q.isYield ? "%" : (isStock && (q.currency ?? "USD") == "USD" ? "US$" : nil)
             change = q.change
             changeBps = q.isYield ? q.changeBps : nil
+            changeAbs = q.isYield ? nil : q.last - q.previous
             url = "https://finance.yahoo.com/quote/" + (i.symbol.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? i.symbol)
         }
 
         public init(symbol: String, name: String?, price: Double, decimals: Int, unit: String?, change: Double,
-                    changeBps: Double? = nil, url: String? = nil) {
+                    changeBps: Double? = nil, changeAbs: Double? = nil, url: String? = nil) {
             self.symbol = symbol; self.name = name; self.price = price; self.decimals = decimals
-            self.unit = unit; self.change = change; self.changeBps = changeBps; self.url = url
+            self.unit = unit; self.change = change; self.changeBps = changeBps; self.changeAbs = changeAbs; self.url = url
         }
     }
 

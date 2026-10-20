@@ -12,6 +12,10 @@
   místo vysvětlování dat. Vyřazen RSS Yahoo Finance index (neaktualizuje se); titulky k watchlistu z Yahoo zůstaly.
 - Tabulky v chatu: jednotka se nad tabulku („Hodnoty v …“) přesune jen, když platí pro všechny číselné
   sloupce. „Hodnota | Změna“ s procenty jen ve změně teď ukáže „Změna (%)“ místo zavádějícího „Hodnoty v %“.
+- **Kurzy jako karty ve stylu Akcií**: každá skupina (indexy, sektory, výnosy a dolar, komodity, futures, watchlist)
+  je karta – ticker tučně a jméno firmy šedě vlevo, cena („766,48 US$“) a zelená/červená změna („+0,4 %“,
+  u výnosů „+4 bb“) vpravo, šipka otevře detail na Yahoo Finance. Jména firem z Yahoo (longName).
+  V textu zprávy jako blok ```aichat-quotes s JSONem (`QuoteBoard` ve FinFillCore); CLI dál tiskne tabulky.
 - CLI: `finfill market-brief [NVDA,AMD]`. Testy: 4 nové (kurzy, RSS/Atom, okno zpráv, prompt), celkem 56.
 
 ---

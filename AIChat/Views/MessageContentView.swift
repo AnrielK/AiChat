@@ -1,4 +1,5 @@
 import CoreTransferable
+import FinFillCore
 import SwiftUI
 import UIKit
 import UniformTypeIdentifiers
@@ -34,6 +35,8 @@ struct MessageContentView: View {
                     TableBlockView(table: table, fileName: MessageBlock.tableFileName(for: index, in: blocks))
                 case .choice(let prompt):
                     ChoiceCardView(prompt: prompt)
+                case .quotes(let board):
+                    QuotesCardView(board: board)
                 }
             }
         }
@@ -50,6 +53,8 @@ enum MessageBlock: Equatable {
     case table(MarkdownTable)
     /// Výběr z možností (```aichat-choice s JSONem) – karta s tlačítky.
     case choice(ChoicePrompt)
+    /// Kurzy ve stylu Akcií (```aichat-quotes s JSONem).
+    case quotes(QuoteBoard)
 
     /// Rozdělí markdown na bloky. Řeší jen to, co SwiftUI `Text` neumí: bloky kódu,
     /// nadpisy, oddělovače a tabulky. Zbytek (tučné, kurzíva, `kód`, odkazy) zůstane inline markdownu.
@@ -82,6 +87,8 @@ enum MessageBlock: Equatable {
                     let body = code.joined(separator: "\n")
                     if language == ChoicePrompt.language, let prompt = ChoicePrompt.decode(body) {
                         blocks.append(.choice(prompt))
+                    } else if language == QuoteBoard.language, let board = QuoteBoard.decode(body) {
+                        blocks.append(.quotes(board))
                     } else {
                         blocks.append(.code(language: language, code: body, closed: true))
                     }

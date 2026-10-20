@@ -66,6 +66,30 @@ final class MarketBriefTests: XCTestCase {
         XCTAssertEqual(sel.map(\.title), ["Fed holds rates steady", "Nvidia jumps"])
     }
 
+    func testQuoteBoards() {
+        var nvda = MarketBrief.Quote(instrument: .init("NVDA", "NVDA", .watchlist), last: 217.09, previous: 214.13, date: "2026-10-19")
+        nvda.longName = "NVIDIA Corporation"; nvda.currency = "USD"; nvda.instrumentType = "EQUITY"
+        let spx = MarketBrief.Quote(instrument: .init("^GSPC", "S&P 500", .index), last: 6767.1, previous: 6740, date: "2026-10-19")
+        let tnx = MarketBrief.Quote(instrument: .init("^TNX", "Výnos 10Y UST", .rates), last: 4.15, previous: 4.11, date: "2026-10-19")
+        let b = MarketBrief(quotes: [spx, tnx, nvda], headlines: [], failed: [], generated: Date())
+        let boards = b.quoteBoards()
+        XCTAssertEqual(boards.map(\.title), ["Indexy", "Výnosy a dolar", "Watchlist"])
+        let row = boards[2].rows[0]
+        XCTAssertEqual(row.symbol, "NVDA")
+        XCTAssertEqual(row.name, "NVIDIA Corporation")
+        XCTAssertEqual(row.unit, "US$")
+        XCTAssertEqual(row.url, "https://finance.yahoo.com/quote/NVDA")
+        XCTAssertEqual(boards[0].rows[0].symbol, "S&P 500")
+        XCTAssertNil(boards[0].rows[0].unit)
+        XCTAssertEqual(boards[1].rows[0].unit, "%")
+        XCTAssertEqual(boards[1].rows[0].changeBps!, 4, accuracy: 1e-6)
+        XCTAssertEqual(boards[0].subtitle, "zavření po 19. 10.")
+        let block = boards[2].markdownBlock
+        XCTAssertTrue(block.hasPrefix("```aichat-quotes\n"))
+        let json = block.split(separator: "\n").dropFirst().dropLast().joined(separator: "\n")
+        XCTAssertEqual(QuoteBoard.decode(json), boards[2])
+    }
+
     func testPromptAndSources() {
         let q = MarketBrief.Quote(instrument: .init("^GSPC", "S&P 500", .index), last: 6767, previous: 6700, date: "2026-10-19")
         let b = MarketBrief(quotes: [q], headlines: [.init(title: "A", source: "CNBC", link: "https://a", date: nil, summary: ""),

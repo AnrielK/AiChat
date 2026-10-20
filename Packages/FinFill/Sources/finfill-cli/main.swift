@@ -256,7 +256,8 @@ do {
             FileHandle.standardError.write(($0 + "\n").data(using: .utf8)!)
         }
         let watch = args.dropFirst().filter { !$0.hasPrefix("--") }.flatMap { $0.split(separator: ",").map(String.init) }
-        print(try await skills.marketBrief(watchlist: watch.isEmpty ? (settings.string("watchlist")?.split(separator: ",").map(String.init) ?? []) : watch))
+        print(try await skills.marketBrief(watchlist: watch.isEmpty ? (settings.string("watchlist")?.split(separator: ",").map(String.init) ?? []) : watch,
+                                           cards: false))
 
     case "valuation":
         let ticker = require(tickerArg(), "ticker (finfill valuation NVDA)")

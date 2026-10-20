@@ -38,6 +38,10 @@ public struct MarketBrief: Sendable {
         public let last: Double
         public let previous: Double
         public let date: String           // den posledního sloupce (NY)
+        /// Z meta Yahoo: celé jméno („NVIDIA Corporation“), měna a typ (EQUITY, ETF, INDEX, FUTURE…).
+        public var longName: String? = nil
+        public var currency: String? = nil
+        public var instrumentType: String? = nil
         public var change: Double { previous != 0 ? last / previous - 1 : 0 }
         /// U výnosů se mění v bazických bodech.
         public var changeBps: Double { (last - previous) * 100 }
@@ -65,7 +69,10 @@ public struct MarketBrief: Sendable {
         var last = points[points.count - 1].c, prev = points[points.count - 2].c
         // ^TNX dřív v desetinách procenta (42.5 = 4,25 %).
         if instrument.symbol == "^TNX" || instrument.symbol == "^FVX", last > 20 { last /= 10; prev /= 10 }
-        return Quote(instrument: instrument, last: last, previous: prev, date: day(points[points.count - 1].t))
+        let meta = result["meta"] as? [String: Any]
+        return Quote(instrument: instrument, last: last, previous: prev, date: day(points[points.count - 1].t),
+                     longName: (meta?["longName"] as? String) ?? (meta?["shortName"] as? String),
+                     currency: meta?["currency"] as? String, instrumentType: meta?["instrumentType"] as? String)
     }
 
     static func day(_ unix: Double) -> String {
@@ -320,9 +327,26 @@ public struct MarketBrief: Sendable {
         return "**Zdroje:** " + list.map { "[\($0.offset + 1)] [\($0.element.source)](\($0.element.link))" }.joined(separator: " · ") + "\n"
     }
 
+    /// Karty kurzů pro chat (```aichat-quotes), jedna na skupinu.
+    public func quoteBoards() -> [QuoteBoard] {
+        Instrument.Group.allCases.compactMap { g in
+            var list = quotes.filter { $0.instrument.group == g }
+            guard !list.isEmpty else { return nil }
+            if g == .sector || g == .watchlist { list.sort { $0.change > $1.change } }
+            let live = g == .futures || list.allSatisfy(isLive)
+            let subtitle = g == .futures ? "aktuálně" : live ? "teď · obchoduje se i v noci" : "zavření \(FilingCalendar.czechDay(list[0].date))"
+            return QuoteBoard(title: g.rawValue, subtitle: subtitle, rows: list.map(QuoteBoard.Row.init))
+        }
+    }
+
+    /// Kurzy v textu odpovědi: karty (appka) nebo tabulky (CLI).
+    public func quotesBlock(cards: Bool) -> String {
+        cards ? quoteBoards().map(\.markdownBlock).joined(separator: "\n\n") + "\n" : quotesMarkdown()
+    }
+
     /// Bez modelu: kurzy + nejnovější titulky.
-    public func plainMarkdown(limit: Int = 15) -> String {
-        var md = quotesMarkdown()
+    public func plainMarkdown(limit: Int = 15, cards: Bool = false) -> String {
+        var md = quotesBlock(cards: cards)
         md += "**Zprávy**\n\n" + headlines.prefix(limit).map { "- [\($0.title)](\($0.link)) · _\($0.source)_" }.joined(separator: "\n") + "\n"
         return md
     }
@@ -330,7 +354,8 @@ public struct MarketBrief: Sendable {
 
 extension ResearchSkills {
     /// /market-brief: včerejší obchodování + zprávy, text modelem.
-    public func marketBrief(watchlist: [String], session: URLSession = .shared) async throws -> String {
+    /// - Parameter cards: kurzy jako karty ve stylu Akcií (appka); false = markdown tabulky (CLI).
+    public func marketBrief(watchlist: [String], cards: Bool = true, session: URLSession = .shared) async throws -> String {
         let brief = await MarketBrief.load(watchlist: watchlist, session: session, log: log)
         let df = DateFormatter()
         df.locale = Locale(identifier: "cs_CZ")
@@ -345,12 +370,69 @@ extension ResearchSkills {
             let text = LLMOutput.clean(try await writer.write(MarketBrief.prompt(data: brief.promptData(), language: options.language),
                                                               maxTokens: 1_400))
             md += text + "\n\n" + brief.sourcesMarkdown(for: text) + "\n"
-            md += "## Kurzy\n\n" + brief.quotesMarkdown()
+            md += "## Kurzy\n\n" + brief.quotesBlock(cards: cards)
         } else {
-            md += brief.plainMarkdown()
+            md += brief.plainMarkdown(cards: cards)
         }
         if !brief.failed.isEmpty { md += "\n_Nenačteno: \(brief.failed.joined(separator: ", "))._\n" }
         md += "\n_Kurzy: Yahoo Finance (zavírací ceny, futures aktuálně). Zprávy (RSS): CNBC, Investing.com, Nasdaq, Google News, MarketWatch, Yahoo Finance (watchlist), Federal Reserve. Není to investiční doporučení._\n"
         return md
+    }
+}
+
+/// Seznam kurzů ve stylu Akcií: ticker a jméno vlevo, cena a změna vpravo.
+/// V odpovědi jako blok ```aichat-quotes s JSONem – appka ho vykreslí jako kartu.
+public struct QuoteBoard: Codable, Sendable, Equatable {
+    public struct Row: Codable, Sendable, Equatable {
+        public var symbol: String          // „NVDA“, „S&P 500“
+        public var name: String?           // „NVIDIA Corporation“
+        public var price: Double
+        public var decimals: Int
+        public var unit: String?           // „US$“, „%“
+        public var change: Double          // podíl (0.014 = +1,4 %)
+        public var changeBps: Double?      // výnosy: změna v bazických bodech
+        public var url: String?
+
+        init(_ q: MarketBrief.Quote) {
+            let i = q.instrument
+            let isStock = ["EQUITY", "ETF", "MUTUALFUND"].contains(q.instrumentType ?? "") || i.group == .sector || i.group == .watchlist
+            switch i.group {
+            case .watchlist:
+                symbol = i.symbol; name = q.longName
+            case .sector:
+                symbol = i.symbol; name = i.name
+            default:
+                symbol = i.name; name = nil
+            }
+            price = q.last
+            decimals = q.isYield || i.symbol == "^VIX" ? 2 : (i.symbol == "EURUSD=X" ? 4 : (q.last >= 10_000 && !isStock ? 0 : 2))
+            unit = q.isYield ? "%" : (isStock && (q.currency ?? "USD") == "USD" ? "US$" : nil)
+            change = q.change
+            changeBps = q.isYield ? q.changeBps : nil
+            url = "https://finance.yahoo.com/quote/" + (i.symbol.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? i.symbol)
+        }
+
+        public init(symbol: String, name: String?, price: Double, decimals: Int, unit: String?, change: Double,
+                    changeBps: Double? = nil, url: String? = nil) {
+            self.symbol = symbol; self.name = name; self.price = price; self.decimals = decimals
+            self.unit = unit; self.change = change; self.changeBps = changeBps; self.url = url
+        }
+    }
+
+    public var title: String
+    public var subtitle: String?
+    public var rows: [Row]
+
+    public static let language = "aichat-quotes"
+
+    public var markdownBlock: String {
+        let enc = JSONEncoder()
+        enc.outputFormatting = [.withoutEscapingSlashes, .sortedKeys]
+        let json = (try? enc.encode(self)).map { String(decoding: $0, as: UTF8.self) } ?? "{}"
+        return "```\(Self.language)\n\(json)\n```"
+    }
+
+    public static func decode(_ json: String) -> QuoteBoard? {
+        try? JSONDecoder().decode(QuoteBoard.self, from: Data(json.utf8))
     }
 }

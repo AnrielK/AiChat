@@ -1,3 +1,17 @@
+# /market-brief – přehled trhu ráno
+
+- `/market-brief` (`/trh`, `/market`, `/prehled`): včerejší obchodování v USA a zprávy důležité pro trh.
+  Kurzy z Yahoo Finance (chart API, bez klíče): S&P 500, Nasdaq, Dow, Russell 2000, VIX, 11 sektorových
+  ETF (seřazené), výnosy 5Y/10Y (změna v bazických bodech), dolarový index, EUR/USD, ropa, zlato, bitcoin
+  a futures ES/NQ aktuálně. Zprávy z RSS: CNBC, Investing.com, Nasdaq, Google News, MarketWatch, Yahoo
+  Finance, Federal Reserve – okno od včerejšího odpoledne (v pondělí od pátku), bez duplicit.
+- Model píše: Včerejší obchodování · Co hýbe trhem (s odkazy [n] na zdroje) · Dnes · Na co dát pozor;
+  smí použít jen načtená čísla a titulky. Bez modelu tabulky kurzů a seznam titulků.
+- Watchlist (z `/morning-note`, `/catalyst-calendar` nebo `/trh NVDA,AMD`) přidá kurzy a titulky vlastních firem.
+- CLI: `finfill market-brief [NVDA,AMD]`. Testy: 4 nové (kurzy, RSS/Atom, okno zpráv, prompt), celkem 56.
+
+---
+
 # Analytické příkazy podle skillů anthropics/financial-services
 
 Lomítkové příkazy v chatu (i `finfill <příkaz>` v CLI). Data ze SEC (XBRL, podání, 8-K položky),

@@ -251,6 +251,13 @@ do {
             }
         }
 
+    case "market-brief", "market":
+        let skills = ResearchSkills(userAgent: value("--ua", "ua") ?? "finfill", engine: engine(), language: value("--language", "language") ?? "Czech") {
+            FileHandle.standardError.write(($0 + "\n").data(using: .utf8)!)
+        }
+        let watch = args.dropFirst().filter { !$0.hasPrefix("--") }.flatMap { $0.split(separator: ",").map(String.init) }
+        print(try await skills.marketBrief(watchlist: watch.isEmpty ? (settings.string("watchlist")?.split(separator: ",").map(String.init) ?? []) : watch))
+
     case "valuation":
         let ticker = require(tickerArg(), "ticker (finfill valuation NVDA)")
         let ua = require(value("--ua", "ua"), "SEC User-Agent", "ua")
@@ -297,6 +304,7 @@ do {
           finfill sector-overview NVDA AMD   přehled odvětví
           finfill catalyst-calendar NVDA AMD kalendář katalyzátorů
           finfill morning-note NVDA AMD      ranní poznámka z nových podání
+          finfill market-brief [NVDA,AMD]    přehled trhu: včerejší obchodování + zprávy z USA
           finfill thesis-tracker NVDA […]    investiční teze (~/.config/finfill/theses.json)
           finfill valuation NVDA             kontrola ocenění v sešitu
           finfill local --html F             offline 10-K

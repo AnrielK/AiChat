@@ -9,12 +9,13 @@ import FinFillCore
 ///     /sector-overview NVDA AMD AVGO   přehled odvětví (jen NVDA = NVDA + uložené peery)
 ///     /catalyst-calendar NVDA AMD      kalendář katalyzátorů (bez tickerů = watchlist)
 ///     /morning-note NVDA AMD           ranní poznámka z nových podání (bez tickerů = watchlist)
+///     /market-brief (/trh)             přehled trhu: včerejší obchodování + zprávy z USA (Yahoo, RSS)
 ///     /thesis-tracker NVDA [úprava]    investiční teze, KPI z XBRL, hodnocení pilířů
 ///
 /// `/valuation-reviewer NVDA` patří k sešitu, proto ho obsluhuje `FinFillCommand`.
 struct ResearchCommand: Sendable, Equatable {
     enum Skill: String, Sendable, CaseIterable {
-        case earningsAnalysis, earningsPreview, sectorOverview, catalystCalendar, morningNote, thesisTracker
+        case earningsAnalysis, earningsPreview, sectorOverview, catalystCalendar, morningNote, thesisTracker, marketBrief
 
         static let aliases: [String: Skill] = [
             "earnings-analysis": .earningsAnalysis, "earnings": .earningsAnalysis, "vysledky": .earningsAnalysis,
@@ -23,6 +24,7 @@ struct ResearchCommand: Sendable, Equatable {
             "catalyst-calendar": .catalystCalendar, "catalysts": .catalystCalendar, "kalendar": .catalystCalendar,
             "morning-note": .morningNote, "morning": .morningNote, "rano": .morningNote,
             "thesis-tracker": .thesisTracker, "thesis": .thesisTracker, "teze": .thesisTracker,
+            "market-brief": .marketBrief, "market": .marketBrief, "trh": .marketBrief, "prehled": .marketBrief,
         ]
     }
 
@@ -69,6 +71,7 @@ struct ResearchCommand: Sendable, Equatable {
     - `/sector-overview NVDA AMD AVGO` – srovnání odvětví (jen `NVDA` = s uloženými peery)
     - `/catalyst-calendar NVDA AMD` – kalendář na 60 dní (bez tickerů watchlist)
     - `/morning-note NVDA AMD` – ranní poznámka z nových podání (bez tickerů watchlist)
+    - `/market-brief` (`/trh`) – přehled trhu: včerejší obchodování v USA, sektory, výnosy, futures a důležité zprávy
     - `/thesis-tracker NVDA` – teze s KPI z XBRL; úpravy: `teze …`, `long …`, `pilíř …`, `riziko …`, `kpi růst tržeb > 20 %`, `cíl 250`, `stop …`, `poznámka …`, `odebrat pilíř 2`, `smazat`
     - `/valuation-reviewer NVDA` – kontrola ocenění v sešitu: DCF vs. Comps vs. trh, WACC, LTM
     """
@@ -157,6 +160,11 @@ struct ResearchCommandProvider: ChatProvider {
 
         case .thesisTracker:
             md = try await thesis(skills)
+
+        case .marketBrief:
+            // Watchlist přidá řádky s kurzy a titulky k vlastním firmám; tickery v příkazu ho přepíšou.
+            if !tickers.isEmpty { Self.defaults.set(tickers.joined(separator: ","), forKey: "finfill.watchlist") }
+            md = try await skills.marketBrief(watchlist: tickers.isEmpty ? Self.watchlist : tickers)
         }
         out.yield(.text(md))
     }

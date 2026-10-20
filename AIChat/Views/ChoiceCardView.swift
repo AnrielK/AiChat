@@ -34,13 +34,19 @@ struct ChoicePrompt: Codable, Equatable, Sendable {
     }
 }
 
-/// Karta s otázkou a možnostmi pod sebou – klepnutí odešle příkaz možnosti (přes openURL
-/// aichat://send, který zpracuje RootView). Napsat číslo možnosti do zprávy funguje taky.
+extension EnvironmentValues {
+    /// Příkaz možnosti označené v kartě s výběrem (ChatViewModel.selectedChoice).
+    @Entry var selectedChoiceCommand: String? = nil
+}
+
+/// Karta s otázkou a možnostmi pod sebou. Klepnutí možnost jen označí (aichat://select,
+/// zpracuje RootView); odešle se tlačítkem Odeslat, druhé klepnutí označení zruší.
+/// Napsat číslo možnosti do zprávy funguje taky.
 struct ChoiceCardView: View {
     let prompt: ChoicePrompt
 
     @Environment(\.openURL) private var openURL
-    @State private var picked: Int?
+    @Environment(\.selectedChoiceCommand) private var selected
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -79,11 +85,9 @@ struct ChoiceCardView: View {
     }
 
     private func optionRow(_ index: Int, _ option: ChoicePrompt.Option) -> some View {
-        let isPicked = picked == index
-        let dimmed = picked != nil && !isPicked
+        let isPicked = selected == option.command
         return Button {
-            guard picked == nil, let url = Self.sendURL(option.command) else { return }
-            withAnimation(.snappy) { picked = index }
+            guard let url = Self.selectURL(option) else { return }
             openURL(url)
         } label: {
             HStack(alignment: .center, spacing: 12) {
@@ -112,9 +116,10 @@ struct ChoiceCardView: View {
                     }
                 }
                 Spacer(minLength: 0)
-                Image(systemName: isPicked ? "checkmark" : "chevron.right")
+                Image(systemName: isPicked ? "checkmark.circle.fill" : "circle")
                     .font(.footnote.weight(.semibold))
-                    .foregroundStyle(isPicked ? Color.accentColor : Color.secondary)
+                    .font(.body)
+                    .foregroundStyle(isPicked ? Color.accentColor : Color.secondary.opacity(0.6))
             }
             .padding(.horizontal, 12)
             .padding(.vertical, 10)
@@ -127,16 +132,15 @@ struct ChoiceCardView: View {
             .contentShape(.rect(cornerRadius: 14))
         }
         .buttonStyle(.plain)
-        .opacity(dimmed ? 0.45 : 1)
-        .disabled(picked != nil)
         .accessibilityLabel("\(index + 1). \(option.label)")
+        .accessibilityAddTraits(isPicked ? .isSelected : [])
     }
 
-    static func sendURL(_ text: String) -> URL? {
+    static func selectURL(_ option: ChoicePrompt.Option) -> URL? {
         var c = URLComponents()
         c.scheme = "aichat"
-        c.host = "send"
-        c.queryItems = [URLQueryItem(name: "text", value: text)]
+        c.host = "select"
+        c.queryItems = [URLQueryItem(name: "text", value: option.command), URLQueryItem(name: "label", value: option.label)]
         return c.url
     }
 }

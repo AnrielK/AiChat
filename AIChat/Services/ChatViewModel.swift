@@ -24,6 +24,21 @@ final class ChatViewModel {
     private(set) var isGenerating = false
     private(set) var streamingMessageID: UUID?
 
+    /// Možnost označená v kartě s výběrem (`ChoiceCardView`). Odešle se až tlačítkem Odeslat –
+    /// místo rozepsaného textu, který zůstane v poli.
+    struct ChoiceSelection: Equatable {
+        var label: String
+        var command: String
+    }
+    private(set) var selectedChoice: ChoiceSelection?
+
+    /// Klepnutí na možnost: označí ji, druhé klepnutí na tutéž označení zruší.
+    func toggleChoice(label: String, command: String) {
+        selectedChoice = selectedChoice?.command == command ? nil : ChoiceSelection(label: label, command: command)
+    }
+
+    func clearChoice() { selectedChoice = nil }
+
     @ObservationIgnored private var generationTask: Task<Void, Never>?
     /// Hledání v historii chatů. Vytvoří se při první zprávě a pak se drží –
     /// `@ModelActor` si zakládá vlastní `ModelContext`, nemá smysl ho dělat pokaždé znovu.
@@ -31,6 +46,7 @@ final class ChatViewModel {
 
     func startNewChat() {
         stop()
+        selectedChoice = nil
         conversation = nil
         usage = nil
         lastProfile = nil
@@ -65,8 +81,9 @@ final class ChatViewModel {
     }
 
     var canSend: Bool {
-        (!draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !attachments.isEmpty)
-            && loadingAttachments == 0
+        selectedChoice != nil ||
+        ((!draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !attachments.isEmpty)
+            && loadingAttachments == 0)
     }
 
     // MARK: - Přílohy
@@ -127,6 +144,7 @@ final class ChatViewModel {
 
     func open(_ conversation: Conversation) {
         stop()
+        selectedChoice = nil
         self.conversation = conversation
         usage = Self.lastUsage(in: conversation)
         // Režim poslední odpovědi – aby navazující dotaz po otevření z historie
@@ -176,6 +194,17 @@ final class ChatViewModel {
     }
 
     func send(context: ModelContext, settings: SettingsStore, models: ModelManager) {
+        // Označená možnost z karty s výběrem má přednost; rozepsaný text i přílohy počkají na další zprávu.
+        if let choice = selectedChoice, !isGenerating {
+            let keptDraft = draft, keptFiles = attachments
+            selectedChoice = nil
+            draft = choice.command
+            attachments = []
+            send(context: context, settings: settings, models: models)
+            draft = keptDraft
+            attachments = keptFiles
+            return
+        }
         let text = draft.trimmingCharacters(in: .whitespacesAndNewlines)
         let files = attachments
         guard canSend, !isGenerating else { return }
@@ -193,6 +222,9 @@ final class ChatViewModel {
             // „finfill new AMD“ apod. – příkaz FinFillu, zpráva nejde modelu (viz FinFillCommand).
             if let command = FinFillCommandProvider.wrapping(text: text, settings: settings, models: models) {
                 provider = command
+            } else if let research = ResearchCommandProvider.wrapping(text: text, settings: settings, models: models) {
+                // /earnings-analysis, /earnings-preview, /sector-overview… (viz ResearchCommand)
+                provider = research
             } else {
                 let base = try settings.makeProvider(models: models, profile: profile)
 

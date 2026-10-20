@@ -1,4 +1,5 @@
 import CoreTransferable
+import FinFillCore
 import SwiftUI
 import UIKit
 import UniformTypeIdentifiers
@@ -34,6 +35,8 @@ struct MessageContentView: View {
                     TableBlockView(table: table, fileName: MessageBlock.tableFileName(for: index, in: blocks))
                 case .choice(let prompt):
                     ChoiceCardView(prompt: prompt)
+                case .quotes(let board):
+                    QuotesCardView(board: board)
                 }
             }
         }
@@ -50,6 +53,8 @@ enum MessageBlock: Equatable {
     case table(MarkdownTable)
     /// Výběr z možností (```aichat-choice s JSONem) – karta s tlačítky.
     case choice(ChoicePrompt)
+    /// Kurzy ve stylu Akcií (```aichat-quotes s JSONem).
+    case quotes(QuoteBoard)
 
     /// Rozdělí markdown na bloky. Řeší jen to, co SwiftUI `Text` neumí: bloky kódu,
     /// nadpisy, oddělovače a tabulky. Zbytek (tučné, kurzíva, `kód`, odkazy) zůstane inline markdownu.
@@ -82,6 +87,8 @@ enum MessageBlock: Equatable {
                     let body = code.joined(separator: "\n")
                     if language == ChoicePrompt.language, let prompt = ChoicePrompt.decode(body) {
                         blocks.append(.choice(prompt))
+                    } else if language == QuoteBoard.language, let board = QuoteBoard.decode(body) {
+                        blocks.append(.quotes(board))
                     } else {
                         blocks.append(.code(language: language, code: body, closed: true))
                     }
@@ -552,7 +559,22 @@ struct MarkdownTable: Equatable {
             }
         }
         let hoisted = MarkdownTable(header: header, alignments: alignments, rows: rows).displayHeader
+        // Nad tabulku jen jednotka, která platí pro všechny číselné sloupce. „Hodnota | Změna (%)“
+        // nesmí dostat „Hodnoty v %“ – procenta patří jen ke změně, zůstanou v hlavičce sloupce.
+        if let unit = hoisted.unit {
+            let numeric = header.indices.filter { Self.isNumericColumn(rows, $0) }.count
+            let carrying = header.filter { Self.splitUnit($0).unit?.lowercased() == unit.lowercased() }.count
+            if carrying < numeric { return (header, rows, nil) }
+        }
         return (hoisted.header, rows, hoisted.unit)
+    }
+
+    /// Sloupec, ve kterém jsou (kromě prázdných a „–“) jen čísla – i s jednotkou nebo znaménkem.
+    static func isNumericColumn(_ rows: [[String]], _ column: Int) -> Bool {
+        let values = rows.compactMap { column < $0.count ? plain($0[column]).trimmingCharacters(in: .whitespaces) : nil }
+            .filter { !$0.isEmpty && !["–", "-", "—", "n/a", "N/A"].contains($0) }
+        guard !values.isEmpty else { return false }
+        return values.allSatisfy { $0.range(of: #"^[+\-−–(≈]?[$€£]?\s?[\d\s\u00A0.,']*\d"#, options: .regularExpression) != nil }
     }
 
     /// Jednotka na konci všech číselných buněk sloupce (prázdné a „–“ se nepočítají).

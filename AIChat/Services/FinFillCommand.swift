@@ -17,7 +17,7 @@ import FinFillCore
 /// Funguje s lomítkem i bez (`/finfill …`) a bez ohledu na velikost písmen. Zpráva se modelu
 /// neposílá – příkaz spustí FinFill a odpověď je jeho výsledek (průběh jde do stavového řádku).
 struct FinFillCommand: Sendable, Equatable {
-    enum Action: Sendable, Equatable { case new, analyze, run(write: Bool), help }
+    enum Action: Sendable, Equatable { case new, analyze, run(write: Bool), valuation, help }
 
     let action: Action
     let ticker: String?
@@ -29,8 +29,12 @@ struct FinFillCommand: Sendable, Equatable {
     var force = false
 
     static func parse(_ text: String) -> FinFillCommand? {
-        let words = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        var words = text.trimmingCharacters(in: .whitespacesAndNewlines)
             .split(whereSeparator: \.isWhitespace).map(String.init)
+        // „/valuation-reviewer NVDA“ = „finfill valuation NVDA“.
+        if let w = words.first?.lowercased(), valuationAliases.contains(w) {
+            words = ["finfill", "valuation"] + words.dropFirst()
+        }
         guard let first = words.first?.lowercased(), first == "finfill" || first == "/finfill" else { return nil }
         let rest = Array(words.dropFirst())
         let verb = rest.first?.lowercased() ?? ""
@@ -44,7 +48,12 @@ struct FinFillCommand: Sendable, Equatable {
             action = .run(write: lower.contains { ["--write", "write", "zapsat", "zapiš"].contains($0) })
         case "zapis", "zápis", "zapsat":
             action = .run(write: true)
-        default: action = .help
+        case "valuation", "valuation-review", "valuation-reviewer", "oceneni", "ocenění":
+            action = .valuation
+        default:
+            // „finfill earnings-preview NVDA“ obslouží ResearchCommand.
+            if ResearchCommand.Skill.aliases[verb.folding(options: .diacriticInsensitive, locale: nil)] != nil { return nil }
+            action = .help
         }
 
         var ticker: String?
@@ -69,6 +78,8 @@ struct FinFillCommand: Sendable, Equatable {
                               sheet: sheet, force: force)
     }
 
+    static let valuationAliases: Set<String> = ["/valuation-reviewer", "/valuation-review", "/valuation", "/ocenění", "/oceneni"]
+
     /// Text příkazu (pro odkazy v nabídce sešitů).
     var text: String {
         guard let ticker else { return "finfill" }
@@ -77,6 +88,7 @@ struct FinFillCommand: Sendable, Equatable {
         case .new: parts.append("new")
         case .analyze: parts.append("analyze")
         case .run: parts.append("run")
+        case .valuation: parts.append("valuation")
         case .help: break
         }
         parts.append(ticker)
@@ -101,6 +113,10 @@ struct FinFillCommand: Sendable, Equatable {
     - `finfill analyze NVDA` – jen Citlivost / Comps / Kvartály do vybraného sešitu
     - `finfill run NVDA` – náhled zápisu posledního 10-K do vybraného sešitu, `finfill run NVDA zapsat` zapíše
     - `fy2025` kdekoli v příkazu = konkrétní fiskální rok, `sešit <ID nebo URL>` = kam zapsat
+
+    - `/valuation-reviewer NVDA` – kontrola ocenění v sešitu (DCF vs. Comps vs. trh, WACC, LTM)
+
+    Analytické příkazy: `/earnings-analysis`, `/earnings-preview`, `/sector-overview`, `/catalyst-calendar`, `/morning-note`, `/thesis-tracker` – napiš `/thesis-tracker` pro nápovědu.
 
     SEC User-Agent, vybraný sešit a přepínače analýz jsou v *Nastavení › 10-K → Sheets*, tam je i přihlášení ke Google.
     Souhrn a earnings review píše model vybraný v Nastavení.
@@ -258,6 +274,14 @@ struct FinFillCommandProvider: ChatProvider {
                 let (_, a) = try await pipeline.analyzeOnly(log: log)
                 md += "**Sešit:** \(Self.sheetLink(sheetName, cfg.spreadsheet))\n\n" + Self.analysisMarkdown(a)
 
+            case .valuation:
+                guard !cfg.spreadsheet.isEmpty else { md = Self.noSheet(ticker); break }
+                out.yield(.status("FinFill: kontrola ocenění \(ticker) v „\(sheetName ?? cfg.spreadsheet)“…\n"))
+                let pipeline = FinFillPipeline(config: cfg, tokens: GoogleTokenProvider(), engine: engine)
+                let review = try await pipeline.valuationReview(log: log)
+                let commentary = await pipeline.valuationCommentary(review)
+                md = review.markdown(ticker: ticker, sheet: Self.sheetLink(sheetName, cfg.spreadsheet), commentary: commentary)
+
             case let .run(write):
                 guard !cfg.spreadsheet.isEmpty else { md = Self.noSheet(ticker); break }
                 cfg.dryRun = !write
@@ -320,7 +344,7 @@ struct FinFillCommandProvider: ChatProvider {
             header: "Sešit",
             question: "Na Disku už \(files.count == 1 ? "je sešit" : "jsou sešity") s \(ticker) v názvu. Aktualizovat, nebo založit nový?",
             options: options,
-            footnote: "Aktualizace zapíše poslední 10-K (vyplněné buňky nepřepíše) a obnoví Citlivost, Comps a Kvartály. Můžeš taky napsat číslo možnosti.")
+            footnote: "Aktualizace zapíše poslední 10-K (vyplněné buňky nepřepíše) a obnoví Citlivost, Comps a Kvartály. Označ možnost a potvrď odesláním, nebo napiš její číslo.")
         PendingChoice.save(options.map(\.command))
         return prompt.markdownBlock
     }
@@ -329,7 +353,7 @@ struct FinFillCommandProvider: ChatProvider {
     static func offerSheets(for command: FinFillCommand, ticker: String, current: String, currentID: String,
                             allowCurrent: Bool = true) async -> String {
         var options: [ChoicePrompt.Option] = []
-        var note = "Můžeš taky napsat číslo možnosti."
+        var note = "Označ možnost a potvrď odesláním, nebo napiš její číslo."
         do {
             let files = try await GoogleDriveClient(tokens: GoogleTokenProvider()).spreadsheets(search: ticker, limit: 50)
             for f in SpreadsheetMatch.candidates(files, ticker: ticker) where f.id != currentID {

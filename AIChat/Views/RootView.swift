@@ -25,17 +25,28 @@ struct RootView: View {
 
         NavigationStack {
             ChatView(chat: chat, dismissKeyboard: { composerFocused = false })
-                // Odkazy aichat://send?text=… v odpovědi (nabídka sešitů FinFillu) odešlou text jako zprávu.
+                // aichat://select?text=…&label=… – karta s výběrem možnost jen označí (odešle se tlačítkem
+                // Odeslat); aichat://send?text=… (odkazy ve starších odpovědích) ji odešle hned.
                 .environment(\.openURL, OpenURLAction { url in
-                    guard url.scheme == "aichat", url.host == "send",
-                          let text = URLComponents(url: url, resolvingAgainstBaseURL: false)?
-                              .queryItems?.first(where: { $0.name == "text" })?.value,
+                    guard url.scheme == "aichat",
+                          let items = URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems,
+                          let text = items.first(where: { $0.name == "text" })?.value,
                           !chat.isGenerating
-                    else { return .systemAction }
-                    chat.draft = text
-                    send()
+                    else { return url.scheme == "aichat" ? .handled : .systemAction }
+                    switch url.host {
+                    case "select":
+                        withAnimation(.snappy) {
+                            chat.toggleChoice(label: items.first(where: { $0.name == "label" })?.value ?? text, command: text)
+                        }
+                    case "send":
+                        chat.draft = text
+                        send()
+                    default:
+                        break
+                    }
                     return .handled
                 })
+                .environment(\.selectedChoiceCommand, chat.selectedChoice?.command)
                 .alert("Historii nejde otevřít", isPresented: Binding(
                     get: { storageError != nil && !storageErrorShown },
                     set: { if !$0 { storageErrorShown = true } }

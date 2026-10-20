@@ -1,3 +1,52 @@
+# /market-brief – přehled trhu ráno
+
+- `/market-brief` (`/trh`, `/market`, `/prehled`): včerejší obchodování v USA a zprávy důležité pro trh.
+  Kurzy z Yahoo Finance (chart API, bez klíče): S&P 500, Nasdaq, Dow, Russell 2000, VIX, 11 sektorových
+  ETF (seřazené), výnosy 5Y/10Y (změna v bazických bodech), dolarový index, EUR/USD, ropa, zlato, bitcoin
+  a futures ES/NQ aktuálně. Zprávy z RSS: CNBC, Investing.com, Nasdaq, Google News, MarketWatch, Yahoo
+  Finance, Federal Reserve – okno od včerejšího odpoledne (v pondělí od pátku), bez duplicit.
+- Model píše: Včerejší obchodování · Co hýbe trhem (s odkazy [n] na zdroje) · Dnes · Na co dát pozor;
+  smí použít jen načtená čísla a titulky. Bez modelu tabulky kurzů a seznam titulků.
+- Watchlist (z `/morning-note`, `/catalyst-calendar` nebo `/trh NVDA,AMD`) přidá kurzy a titulky vlastních firem.
+- Měny, komodity a krypto se obchodují i v noci: v tabulce „teď (obchoduje se i v noci)“, model píše „ráno“
+  místo vysvětlování dat. Vyřazen RSS Yahoo Finance index (neaktualizuje se); titulky k watchlistu z Yahoo zůstaly.
+- Tabulky v chatu: jednotka se nad tabulku („Hodnoty v …“) přesune jen, když platí pro všechny číselné
+  sloupce. „Hodnota | Změna“ s procenty jen ve změně teď ukáže „Změna (%)“ místo zavádějícího „Hodnoty v %“.
+- **Kurzy jako karty ve stylu Akcií**: každá skupina (indexy, sektory, výnosy a dolar, komodity, futures, watchlist)
+  je karta – ticker tučně a jméno firmy šedě vlevo, cena („766,48 US$“) a zelená/červená změna („+0,4 %“,
+  u výnosů „+4 bb“) vpravo, šipka otevře detail na Yahoo Finance. Jména firem z Yahoo (longName).
+  V textu zprávy jako blok ```aichat-quotes s JSONem (`QuoteBoard` ve FinFillCore); CLI dál tiskne tabulky.
+- CLI: `finfill market-brief [NVDA,AMD]`. Testy: 4 nové (kurzy, RSS/Atom, okno zpráv, prompt), celkem 56.
+
+---
+
+# Analytické příkazy podle skillů anthropics/financial-services
+
+Lomítkové příkazy v chatu (i `finfill <příkaz>` v CLI). Data ze SEC (XBRL, podání, 8-K položky),
+text píše model z Nastavení podle osnovy skillu; čísla jen ověřená z XBRL. Konsenzus, ceny a zprávy
+v datech nejsou – výstupy to říkají.
+
+- `/earnings-analysis NVDA` – výsledky posledního kvartálu, YoY/QoQ, review MD&A (Q4 z 10-K, Item 7).
+- `/earnings-preview NVDA` – odhad termínu (8-K 2.02 loni + 52 týdnů), posledních 5 kvartálů, scénáře
+  optimistický / základní / pesimistický z historie QoQ a marží, model: na co se dívat, co by muselo nastat,
+  výhled vedení, otázky.
+- `/sector-overview NVDA AMD AVGO` – srovnání LTM (tržby, podíl ve skupině, růst, marže, FCF, čistý dluh),
+  mediány; model: dynamika, konkurenční pozice (z Item 1 10-K), trendy, implikace. Jen `NVDA` = s uloženými peery.
+- `/catalyst-calendar NVDA AMD` – tento týden, 60 dní (výsledky, 10-Q/10-K, valná hromada – odhady)
+  a podání za 14 dní s dopadem V/S/N. Tickery se uloží jako watchlist.
+- `/morning-note` – nová podání od posledního pracovního dne (8-K položky, 10-Q/10-K, Form 4),
+  rychlé srovnání výsledků, události týdne; model: hlavní bod a pohled na každou firmu.
+- `/thesis-tracker NVDA` – teze, pilíře, rizika, KPI kontrolované proti poslednímu kvartálu (✓/✗),
+  hodnocení pilířů modelem (drží / sledovat / porušen) a přesvědčení; deník s dopadem poznámky.
+  Úpravy: `teze`, `long`/`short`, `pilíř`, `riziko`, `kpi růst tržeb > 20 %`, `cíl`, `stop`, `poznámka`,
+  `odebrat pilíř 2`, `smazat`; bez tickeru seznam tezí. Ukládá se do Application Support/FinFill/theses.json.
+- `/valuation-reviewer NVDA` – kontrola ocenění v sešitu (obdoba agenta valuation-reviewer pro fondy):
+  DCF vs. Comps (podle metod) vs. trh, kontrola DCF, WACC (rf, beta, prémie, náklad dluhu), výchozí rok
+  DCF vs. LTM ze SEC; komentář modelu. Stejná kontrola sešitu jako u `finfill analyze` (karta s výběrem).
+- Testy: 7 nových (podání, termíny, kalendář, ranní okno, scénáře, teze, kontrola ocenění), celkem 52.
+
+---
+
 # FinFill: Citlivost, Comps, Kvartály a kontrola DCF
 
 Podle skillů dcf-model, comps-analysis a earnings-analysis z `anthropics/financial-services`, ale
@@ -37,6 +86,9 @@ počítané kódem z SEC a zapsané jako vzorce. V obrazovce 10-K → Sheets nov
   s číslem, popisem (kdy byl sešit upravený) a „doporučeno“ u první; klepnutí možnost označí a odešle,
   ostatní zešednou. V textu zprávy je jako blok ```aichat-choice s JSONem (`ChoicePrompt`), takže se uloží
   s konverzací bez změny databáze. Napsat číslo možnosti funguje dál.
+- **Výběr se potvrzuje odesláním**: klepnutí na možnost ji jen označí (kroužek → fajfka, druhé klepnutí
+  označení zruší) a nad polem pro zprávu se ukáže štítek „… · Odeslat pro potvrzení“ s křížkem.
+  Tlačítko Odeslat pošle příkaz označené možnosti; rozepsaný text a přílohy zůstanou v poli.
 - CLI s nastavením: stačí `finfill new AMD` / `finfill run NVDA --write` / `finfill analyze NVDA`. User-Agent,
   token (nebo `token_command`), sešit, model, jazyk, kvartály a peery pro každý ticker se ukládají přes
   `finfill config` do `~/.config/finfill/config.json`; přepínače mají přednost.

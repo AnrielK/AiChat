@@ -167,15 +167,29 @@ public struct QuarterlyReview: Sendable {
 }
 
 extension Summarizer {
-    /// Earnings review posledního 10-Q: MD&A → poznámky → šablona `QuarterBrief`.
-    public func reviewQuarter(filingHTML: String, company: String, figures: QuarterlyFigures,
-                              progress: @Sendable (Progress) -> Void = { _ in }) async throws -> String {
+    /// Poznámky z MD&A posledního 10-Q (Item 2) nebo 10-K (Item 7), jako jeden text.
+    public func mdaNotes(filingHTML: String, company: String, form: String,
+                         progress: @Sendable (Progress) -> Void = { _ in }) async throws -> String {
         let text = HTMLText.toPlainText(filingHTML)
-        let sections = FilingSections.extract(plainText: text, items: FilingSections.quarterlyItems,
-                                              titleOverrides: FilingSections.quarterlyTitles)
-        let notes = try await sectionSummaries(sections, document: "10-Q", company: company, progress: progress)
+        let annual = form.hasPrefix("10-K")
+        let sections = FilingSections.extract(plainText: text, items: annual ? ["7"] : FilingSections.quarterlyItems,
+                                              titleOverrides: annual ? [:] : FilingSections.quarterlyTitles)
+        let notes = try await sectionSummaries(sections, document: annual ? "10-K" : "10-Q", company: company, progress: progress)
+        return notes.map { "### Item \($0.item) — \($0.title)\n\($0.summary)" }.joined(separator: "\n\n")
+    }
+
+    /// Jedno kolo „instrukce → markdown“ pro skilly (bez šablony k parsování).
+    public func write(_ prompt: String, maxTokens: Int? = nil) async throws -> String {
+        try await ask(prompt, maxTokens: maxTokens ?? options.finalMaxTokens)
+    }
+
+    /// Earnings review posledního 10-Q: MD&A → poznámky → šablona `QuarterBrief`.
+    /// - Parameter form: „10-Q“ (MD&A = Item 2) nebo „10-K“ (Q4 – MD&A = Item 7).
+    public func reviewQuarter(filingHTML: String, company: String, figures: QuarterlyFigures, form: String = "10-Q",
+                              progress: @Sendable (Progress) -> Void = { _ in }) async throws -> String {
+        let notes = try await mdaNotes(filingHTML: filingHTML, company: company, form: form, progress: progress)
         progress(.final)
-        let joined = notes.map { "### Item \($0.item) — \($0.title)\n\($0.summary)" }.joined(separator: "\n\n")
+        let joined = notes
         let prompt = QuarterBrief.prompt(company: company, quarter: figures.latest?.quarter.label ?? "the latest quarter",
                                          language: options.language, figures: figures.promptTable(),
                                          sections: clip(joined.isEmpty ? "(MD&A section not found)" : joined, chunkChars))

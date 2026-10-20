@@ -552,7 +552,22 @@ struct MarkdownTable: Equatable {
             }
         }
         let hoisted = MarkdownTable(header: header, alignments: alignments, rows: rows).displayHeader
+        // Nad tabulku jen jednotka, která platí pro všechny číselné sloupce. „Hodnota | Změna (%)“
+        // nesmí dostat „Hodnoty v %“ – procenta patří jen ke změně, zůstanou v hlavičce sloupce.
+        if let unit = hoisted.unit {
+            let numeric = header.indices.filter { Self.isNumericColumn(rows, $0) }.count
+            let carrying = header.filter { Self.splitUnit($0).unit?.lowercased() == unit.lowercased() }.count
+            if carrying < numeric { return (header, rows, nil) }
+        }
         return (hoisted.header, rows, hoisted.unit)
+    }
+
+    /// Sloupec, ve kterém jsou (kromě prázdných a „–“) jen čísla – i s jednotkou nebo znaménkem.
+    static func isNumericColumn(_ rows: [[String]], _ column: Int) -> Bool {
+        let values = rows.compactMap { column < $0.count ? plain($0[column]).trimmingCharacters(in: .whitespaces) : nil }
+            .filter { !$0.isEmpty && !["–", "-", "—", "n/a", "N/A"].contains($0) }
+        guard !values.isEmpty else { return false }
+        return values.allSatisfy { $0.range(of: #"^[+\-−–(≈]?[$€£]?\s?[\d\s\u00A0.,']*\d"#, options: .regularExpression) != nil }
     }
 
     /// Jednotka na konci všech číselných buněk sloupce (prázdné a „–“ se nepočítají).

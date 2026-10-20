@@ -75,5 +75,11 @@ final class MarketBriefTests: XCTestCase {
         XCTAssertEqual(b.sourcesMarkdown(for: "text [2] a"), "**Zdroje:** [2] [MW](https://b)\n")
         XCTAssertTrue(b.quotesMarkdown().contains("| S&P 500 | 6767 | +1.00 % |"))
         XCTAssertTrue(MarketBrief.prompt(data: "x", language: "Czech").contains("## Včerejší obchodování"))
+
+        let oil = MarketBrief.Quote(instrument: .init("CL=F", "Ropa WTI", .commodity), last: 60, previous: 63, date: "2026-10-20")
+        let b2 = MarketBrief(quotes: [q, oil], headlines: [], failed: [], generated: Date())
+        XCTAssertTrue(b2.quotesMarkdown().contains("**Komodity a krypto** · teď (obchoduje se i v noci)"), b2.quotesMarkdown())
+        XCTAssertTrue(b2.quotesMarkdown().contains("**Indexy** · zavření 2026-10-19"))
+        XCTAssertTrue(b2.promptData().contains("Ropa WTI: 60.00 (-4.76 %) now"), b2.promptData())
     }
 }

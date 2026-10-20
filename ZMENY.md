@@ -8,6 +8,10 @@
 - Model píše: Včerejší obchodování · Co hýbe trhem (s odkazy [n] na zdroje) · Dnes · Na co dát pozor;
   smí použít jen načtená čísla a titulky. Bez modelu tabulky kurzů a seznam titulků.
 - Watchlist (z `/morning-note`, `/catalyst-calendar` nebo `/trh NVDA,AMD`) přidá kurzy a titulky vlastních firem.
+- Měny, komodity a krypto se obchodují i v noci: v tabulce „teď (obchoduje se i v noci)“, model píše „ráno“
+  místo vysvětlování dat. Vyřazen RSS Yahoo Finance index (neaktualizuje se); titulky k watchlistu z Yahoo zůstaly.
+- Tabulky v chatu: jednotka se nad tabulku („Hodnoty v …“) přesune jen, když platí pro všechny číselné
+  sloupce. „Hodnota | Změna“ s procenty jen ve změně teď ukáže „Změna (%)“ místo zavádějícího „Hodnoty v %“.
 - CLI: `finfill market-brief [NVDA,AMD]`. Testy: 4 nové (kurzy, RSS/Atom, okno zpráv, prompt), celkem 56.
 
 ---

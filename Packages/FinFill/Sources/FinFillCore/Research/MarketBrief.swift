@@ -100,7 +100,6 @@ public struct MarketBrief: Sendable {
         .init("Nasdaq", "https://www.nasdaq.com/feed/rssoutbound?category=Markets"),
         .init("Google News", "https://news.google.com/rss/search?q=%28%22stock%20market%22%20OR%20%22Wall%20Street%22%20OR%20%22Federal%20Reserve%22%20OR%20Treasury%20yields%29%20when%3A1d&hl=en-US&gl=US&ceid=US%3Aen"),
         .init("MarketWatch", "https://feeds.content.dowjones.io/public/rss/mw_topstories"),
-        .init("Yahoo Finance", "https://finance.yahoo.com/news/rssindex"),
         .init("Federal Reserve", "https://www.federalreserve.gov/feeds/press_all.xml"),
     ]
 
@@ -241,6 +240,14 @@ public struct MarketBrief: Sendable {
         return (v, String(format: "%+.2f %%", q.change * 100))
     }
 
+    /// Den posledního zavření akciového trhu (podle S&P 500).
+    var sessionDate: String? { quotes.first { $0.instrument.symbol == "^GSPC" }?.date ?? quotes.first { $0.instrument.group == .index }?.date }
+
+    /// Měny, komodity, krypto a futures se obchodují i v noci – jejich poslední „den“ je už dnešek.
+    func isLive(_ q: Quote) -> Bool {
+        q.instrument.group == .futures || (sessionDate.map { q.date > $0 } ?? false)
+    }
+
     /// Tabulky kurzů podle skupin (sektory seřazené od nejlepšího).
     public func quotesMarkdown() -> String {
         var md = ""
@@ -249,7 +256,9 @@ public struct MarketBrief: Sendable {
             guard !list.isEmpty else { continue }
             if g == .sector || g == .watchlist { list.sort { $0.change > $1.change } }
             let day = list.first.map { $0.date } ?? ""
-            md += "**\(g.rawValue)**" + (g == .futures ? "" : " · \(day)") + "\n\n| | Hodnota | Změna |\n|---|---:|---:|\n"
+            let live = g != .futures && list.allSatisfy(isLive)
+            md += "**\(g.rawValue)**" + (g == .futures ? "" : live ? " · teď (obchoduje se i v noci)" : " · zavření \(day)")
+            md += "\n\n| | Hodnota | Změna |\n|---|---:|---:|\n"
             for q in list {
                 let f = format(q)
                 md += "| \(q.instrument.name) | \(f.value) | \(f.change) |\n"
@@ -263,7 +272,7 @@ public struct MarketBrief: Sendable {
     public func promptData() -> String {
         let q = quotes.map { q -> String in
             let f = format(q)
-            return "- [\(q.instrument.group.rawValue)] \(q.instrument.name): \(f.value) (\(f.change)) \(q.instrument.group == .futures ? "now" : "close \(q.date)")"
+            return "- [\(q.instrument.group.rawValue)] \(q.instrument.name): \(f.value) (\(f.change)) \(isLive(q) ? "now, trades overnight – change since yesterday" : "close \(q.date)")"
         }.joined(separator: "\n")
         let df = DateFormatter()
         df.locale = Locale(identifier: "en_US_POSIX")
@@ -288,7 +297,8 @@ public struct MarketBrief: Sendable {
 
         ## Včerejší obchodování
         3–4 sentences: how the main indexes closed, which sectors led and lagged, what yields, the dollar, oil and VIX did, \
-        and the most likely reason according to the headlines.
+        and the most likely reason according to the headlines. Items marked "now" trade overnight – say "ráno" for them, \
+        do not explain data dates.
         ## Co hýbe trhem
         - 5–8 bullets, most important first, each max 25 words with [n] citations; group makro/Fed first, then companies, then the rest
         ## Dnes
@@ -340,7 +350,7 @@ extension ResearchSkills {
             md += brief.plainMarkdown()
         }
         if !brief.failed.isEmpty { md += "\n_Nenačteno: \(brief.failed.joined(separator: ", "))._\n" }
-        md += "\n_Kurzy: Yahoo Finance (zavírací ceny, futures aktuálně). Zprávy (RSS): CNBC, Investing.com, Nasdaq, Google News, MarketWatch, Yahoo Finance, Federal Reserve. Není to investiční doporučení._\n"
+        md += "\n_Kurzy: Yahoo Finance (zavírací ceny, futures aktuálně). Zprávy (RSS): CNBC, Investing.com, Nasdaq, Google News, MarketWatch, Yahoo Finance (watchlist), Federal Reserve. Není to investiční doporučení._\n"
         return md
     }
 }

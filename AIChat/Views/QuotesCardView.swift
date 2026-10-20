@@ -96,10 +96,14 @@ struct QuotesCardView: View {
         number(r.price, decimals: r.decimals) + (r.unit.map { " " + $0 } ?? "")
     }
 
+    /// „+2,96 · +1,4 %“ (u výnosů „+4 bb“).
     static func change(_ r: QuoteBoard.Row) -> String {
         if let bps = r.changeBps { return number(bps, decimals: 0, sign: true) + " bb" }
         let pct = r.change * 100
-        return number(pct, decimals: abs(pct) < 10 ? 1 : 0, sign: true) + " %"
+        let percent = number(pct, decimals: abs(pct) < 10 ? 1 : 0, sign: true) + " %"
+        guard let a = r.changeAbs else { return percent }
+        let decimals = abs(a) >= 100 ? 0 : r.decimals
+        return number(a, decimals: decimals, sign: true) + " · " + percent
     }
 
     static func color(_ r: QuoteBoard.Row) -> Color {

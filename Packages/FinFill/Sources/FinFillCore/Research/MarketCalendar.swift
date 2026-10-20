@@ -162,11 +162,14 @@ public struct MarketCalendar: Sendable, Equatable {
         v >= 1e12 ? String(format: "%.2f bil. $", v / 1e12) : v >= 1e9 ? String(format: "%.0f mld. $", v / 1e9) : String(format: "%.0f mil. $", v / 1e6)
     }
 
-    public func markdown(today: Bool) -> String {
+    public func markdown(today: Bool, cards: Bool = false) -> String {
         guard !isEmpty else { return "" }
-        var md = "## Kalendář \(today ? "dne" : "na \(FilingCalendar.czechDay(day))") (čas Praha)\n\n"
+        var md = "## Kalendář \(today ? "dne" : "na \(FilingCalendar.czechDay(day))")\n\n"
+        if cards {
+            return md + boards().map(\.markdownBlock).joined(separator: "\n\n") + "\n\n"
+        }
         if !econ.isEmpty {
-            md += "| Čas | Událost | Prognóza | Minule | Dopad |\n|---|---|---:|---:|---|\n"
+            md += "| Čas (Praha) | Událost | Prognóza | Minule | Dopad |\n|---|---|---:|---:|---|\n"
             for e in econ {
                 let flag = e.country == "USD" ? "" : "\(e.country): "
                 let title = e.isSpeech ? "🎙 \(flag)\(e.title)" : "\(flag)\(e.title)"
@@ -187,6 +190,45 @@ public struct MarketCalendar: Sendable, Equatable {
         return md
     }
 
+    /// Karty pro chat: Ekonomika a projevy · Aukce dluhopisů · Výsledky (před otevřením, pak po zavření).
+    public func boards() -> [ListBoard] {
+        var out: [ListBoard] = []
+        if !econ.isEmpty {
+            out.append(ListBoard(title: "Ekonomika a projevy", subtitle: "čas Praha", rows: econ.map { e in
+                let flag = e.country == "USD" ? "" : "\(e.country) · "
+                return ListBoard.Row(
+                    title: (e.isSpeech ? "🎙 " : "") + e.title,
+                    subtitle: flag + Self.time(e.date).replacingOccurrences(of: " (", with: " · ").replacingOccurrences(of: ")", with: ""),
+                    value: e.forecast.isEmpty ? (e.isSpeech ? "projev" : "—") : e.forecast,
+                    detail: e.previous.isEmpty ? nil : "minule \(e.previous)",
+                    tone: e.impact == "High" ? .high : e.impact == "Medium" ? .medium : .low,
+                    badge: Self.impactCZ[e.impact].map { "dopad " + $0 })
+            }, footnote: "Hodnota vpravo = prognóza trhu."))
+        }
+        if !auctions.isEmpty {
+            out.append(ListBoard(title: "Aukce dluhopisů", subtitle: "TreasuryDirect", rows: auctions.map { a in
+                ListBoard.Row(title: a.security, subtitle: nil, value: a.amount.map(Self.money) ?? "—", detail: nil)
+            }))
+        }
+        if !earnings.isEmpty {
+            let order = ["před otevřením": 0, "po zavření": 1]
+            let sorted = earnings.enumerated().sorted { a, b in
+                let x = order[a.element.time] ?? 2, y = order[b.element.time] ?? 2
+                return x != y ? x < y : a.offset < b.offset
+            }.map(\.element)
+            out.append(ListBoard(title: "Výsledky firem", subtitle: "odhad EPS = konsenzus", rows: sorted.map { e in
+                ListBoard.Row(
+                    title: e.symbol,
+                    subtitle: e.name + (e.marketCap > 0 ? " · \(Self.money(e.marketCap))" : ""),
+                    value: e.epsForecast.isEmpty ? "—" : "EPS \(e.epsForecast)",
+                    detail: e.time == "před otevřením" ? "☀︎ před otevřením" : e.time == "po zavření" ? "☾ po zavření" : "čas neuveden",
+                    tone: nil, badge: nil,
+                    url: "https://finance.yahoo.com/quote/" + e.symbol)
+            }))
+        }
+        return out
+    }
+
     public func promptData() -> String {
         guard !isEmpty else { return "TODAY'S CALENDAR: (none loaded)" }
         var lines: [String] = []
@@ -200,5 +242,49 @@ public struct MarketCalendar: Sendable, Equatable {
                          + (e.marketCap > 0 ? ", market cap \(Self.money(e.marketCap))" : ""))
         }
         return "TODAY'S CALENDAR (\(day), times Prague with ET):\n" + lines.joined(separator: "\n")
+    }
+}
+
+/// Obecná karta se seznamem (```aichat-list): název a popis vlevo, hodnota a detail vpravo,
+/// volitelně barevná tečka (dopad) a odkaz. Používá kalendář dne.
+public struct ListBoard: Codable, Sendable, Equatable {
+    public enum Tone: String, Codable, Sendable { case high, medium, low, up, down }
+
+    public struct Row: Codable, Sendable, Equatable {
+        public var title: String
+        public var subtitle: String?
+        public var value: String?
+        public var detail: String?
+        public var tone: Tone?
+        public var badge: String?
+        public var url: String?
+
+        public init(title: String, subtitle: String?, value: String?, detail: String?, tone: Tone? = nil,
+                    badge: String? = nil, url: String? = nil) {
+            self.title = title; self.subtitle = subtitle; self.value = value; self.detail = detail
+            self.tone = tone; self.badge = badge; self.url = url
+        }
+    }
+
+    public var title: String
+    public var subtitle: String?
+    public var rows: [Row]
+    public var footnote: String?
+
+    public init(title: String, subtitle: String?, rows: [Row], footnote: String? = nil) {
+        self.title = title; self.subtitle = subtitle; self.rows = rows; self.footnote = footnote
+    }
+
+    public static let language = "aichat-list"
+
+    public var markdownBlock: String {
+        let enc = JSONEncoder()
+        enc.outputFormatting = [.withoutEscapingSlashes, .sortedKeys]
+        let json = (try? enc.encode(self)).map { String(decoding: $0, as: UTF8.self) } ?? "{}"
+        return "```\(Self.language)\n\(json)\n```"
+    }
+
+    public static func decode(_ json: String) -> ListBoard? {
+        try? JSONDecoder().decode(ListBoard.self, from: Data(json.utf8))
     }
 }

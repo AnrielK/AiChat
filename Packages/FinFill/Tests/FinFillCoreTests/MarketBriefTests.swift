@@ -148,6 +148,27 @@ final class MarketBriefTests: XCTestCase {
         XCTAssertTrue(md.contains("NFLX (po zavření, EPS odhad $5.12)"), md)
         XCTAssertTrue(cal.promptData().contains("Fed Chair Powell Speaks [impact High]"))
 
+        let boards = cal.boards()
+        XCTAssertEqual(boards.map(\.title), ["Ekonomika a projevy", "Aukce dluhopisů", "Výsledky firem"])
+        let powell = boards[0].rows[2]
+        XCTAssertEqual(powell.title, "🎙 Fed Chair Powell Speaks")
+        XCTAssertEqual(powell.subtitle, "19:00 · 13:00 ET")
+        XCTAssertEqual(powell.value, "projev")
+        XCTAssertEqual(powell.tone, .high)
+        XCTAssertEqual(boards[0].rows[0].detail, "minule 1.28M")
+        // Před otevřením (KO) první, pak po zavření.
+        XCTAssertEqual(boards[2].rows.map(\.title), ["KO", "MU", "NFLX"])
+        XCTAssertEqual(boards[2].rows[2].detail, "☾ po zavření")
+        XCTAssertEqual(boards[2].rows[2].value, "EPS $5.12")
+        let card = cal.markdown(today: true, cards: true)
+        XCTAssertTrue(card.contains("```aichat-list\n"))
+        let json = boards[2].markdownBlock.split(separator: "\n").dropFirst().dropLast().joined(separator: "\n")
+        XCTAssertEqual(ListBoard.decode(json), boards[2])
+
+        let b = MarketBrief(quotes: [], headlines: [.init(title: "A", source: "Nasdaq", link: "https://n.com/a (b)", date: nil, summary: "")],
+                            failed: [], generated: Date())
+        XCTAssertEqual(b.sourcesMarkdown(for: "[1]"), "**Zdroje:** [1] [Nasdaq](https://n.com/a%20%28b%29)\n")
+
         // Sobota → pondělí.
         XCTAssertEqual(MarketCalendar.tradingDay(MarketBrief.parseDate("Sat, 24 Oct 2026 12:00:00 GMT")!), "2026-10-26")
         XCTAssertEqual(MarketCalendar.tradingDay(MarketBrief.parseDate("Tue, 20 Oct 2026 05:30:00 GMT")!), "2026-10-20")

@@ -335,7 +335,11 @@ public struct MarketBrief: Sendable {
             .compactMap { Range($0.range(at: 1), in: text).flatMap { Int(text[$0]) } } ?? [])
         let list = headlines.enumerated().filter { cited.contains($0.offset + 1) }
         guard !list.isEmpty else { return "" }
-        return "**Zdroje:** " + list.map { "[\($0.offset + 1)] [\($0.element.source)](\($0.element.link))" }.joined(separator: " · ") + "\n"
+        // Závorky a mezery v URL by markdown odkaz rozbily (zobrazil by se holý text).
+        func safe(_ u: String) -> String {
+            u.replacingOccurrences(of: " ", with: "%20").replacingOccurrences(of: "(", with: "%28").replacingOccurrences(of: ")", with: "%29")
+        }
+        return "**Zdroje:** " + list.map { "[\($0.offset + 1)] [\($0.element.source)](\(safe($0.element.link)))" }.joined(separator: " · ") + "\n"
     }
 
     /// Karty kurzů pro chat (```aichat-quotes), jedna na skupinu.
@@ -381,10 +385,10 @@ extension ResearchSkills {
             let text = LLMOutput.clean(try await writer.write(MarketBrief.prompt(data: brief.promptData(), language: options.language),
                                                               maxTokens: 1_400))
             md += text + "\n\n" + brief.sourcesMarkdown(for: text) + "\n"
-            if let cal = brief.calendar { md += cal.markdown(today: cal.day == MarketCalendar.nyDay(brief.generated)) }
+            if let cal = brief.calendar { md += cal.markdown(today: cal.day == MarketCalendar.nyDay(brief.generated), cards: cards) }
             md += "## Kurzy\n\n" + brief.quotesBlock(cards: cards)
         } else {
-            if let cal = brief.calendar { md += cal.markdown(today: cal.day == MarketCalendar.nyDay(brief.generated)) }
+            if let cal = brief.calendar { md += cal.markdown(today: cal.day == MarketCalendar.nyDay(brief.generated), cards: cards) }
             md += brief.plainMarkdown(cards: cards)
         }
         if !brief.failed.isEmpty { md += "\n_Nenačteno: \(brief.failed.joined(separator: ", "))._\n" }

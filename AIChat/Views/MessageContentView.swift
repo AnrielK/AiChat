@@ -37,6 +37,8 @@ struct MessageContentView: View {
                     ChoiceCardView(prompt: prompt)
                 case .quotes(let board):
                     QuotesCardView(board: board)
+                case .list(let board):
+                    ListCardView(board: board)
                 }
             }
         }
@@ -55,6 +57,8 @@ enum MessageBlock: Equatable {
     case choice(ChoicePrompt)
     /// Kurzy ve stylu Akcií (```aichat-quotes s JSONem).
     case quotes(QuoteBoard)
+    /// Seznam (kalendář dne…) – ```aichat-list s JSONem.
+    case list(ListBoard)
 
     /// Rozdělí markdown na bloky. Řeší jen to, co SwiftUI `Text` neumí: bloky kódu,
     /// nadpisy, oddělovače a tabulky. Zbytek (tučné, kurzíva, `kód`, odkazy) zůstane inline markdownu.
@@ -89,6 +93,8 @@ enum MessageBlock: Equatable {
                         blocks.append(.choice(prompt))
                     } else if language == QuoteBoard.language, let board = QuoteBoard.decode(body) {
                         blocks.append(.quotes(board))
+                    } else if language == ListBoard.language, let board = ListBoard.decode(body) {
+                        blocks.append(.list(board))
                     } else {
                         blocks.append(.code(language: language, code: body, closed: true))
                     }

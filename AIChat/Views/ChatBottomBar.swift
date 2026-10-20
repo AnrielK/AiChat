@@ -23,18 +23,30 @@ struct ChatBottomBar: View {
     var body: some View {
         let downloading = DownloadManager.shared.activeCount
 
-        GlassEffectContainer(spacing: 12) {
-            HStack(alignment: .bottom, spacing: 10) {
-                if !isFocused.wrappedValue {
-                    circleButton("Historie", symbol: "clock.arrow.circlepath", id: "history", action: onHistory)
+        let slash = SlashCommand.matches(for: chat.draft)
+        VStack(alignment: .leading, spacing: 8) {
+            // Napsané „/“ na začátku zprávy: nabídka příkazů nad polem, filtruje se podle psaní.
+            if !slash.isEmpty {
+                SlashCommandMenu(commands: slash) { command in
+                    chat.draft = command.insert
                 }
-                composer
-                if !isFocused.wrappedValue {
-                    circleButton("Nastavení", symbol: "gearshape", id: "settings", action: onSettings)
-                        .accessibilityValue(downloading > 0 ? "stahuje se \(downloading)" : "")
+                .padding(.trailing, 60)
+                .transition(.move(edge: .bottom).combined(with: .opacity))
+            }
+            GlassEffectContainer(spacing: 12) {
+                HStack(alignment: .bottom, spacing: 10) {
+                    if !isFocused.wrappedValue {
+                        circleButton("Historie", symbol: "clock.arrow.circlepath", id: "history", action: onHistory)
+                    }
+                    composer
+                    if !isFocused.wrappedValue {
+                        circleButton("Nastavení", symbol: "gearshape", id: "settings", action: onSettings)
+                            .accessibilityValue(downloading > 0 ? "stahuje se \(downloading)" : "")
+                    }
                 }
             }
         }
+        .animation(.snappy(duration: 0.2), value: slash.map(\.name))
         // Odznak musí být MIMO GlassEffectContainer – kontejner kreslí sklo všech tlačítek
         // v jedné vrstvě nad jejich overlayi, takže odznak na tlačítku skončil pod okrajem skla.
         // Tlačítko Nastavení je vždy vpravo dole, rámeček 50×50 v rohu leží přesně na něm.

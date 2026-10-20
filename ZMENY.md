@@ -1,3 +1,14 @@
+# Nabídka příkazů „/“ a přehlednější kurzy
+
+- **„/“ v poli zprávy**: nad polem se ukáže nabídka příkazů s ikonou a popisem (market-brief, morning-note,
+  earnings-analysis, earnings-preview, sector-overview, catalyst-calendar, thesis-tracker, valuation-reviewer,
+  finfill new / analyze / run). Psaním se filtruje („/ea“ → earnings-…, „/prev“ → earnings-preview),
+  klepnutí vloží příkaz s mezerou a nabídka zmizí.
+- **Řádek kurzu jako v Akciích**: procenta v barevném štítku vpravo (u výnosů bazické body), cena a pod ní
+  menším písmem změna v jednotkách ceny.
+
+---
+
 # /market-brief – přehled trhu ráno
 
 - `/market-brief` (`/trh`, `/market`, `/prehled`): včerejší obchodování v USA a zprávy důležité pro trh.

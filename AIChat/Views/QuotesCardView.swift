@@ -57,19 +57,26 @@ struct QuotesCardView: View {
                     }
                 }
                 Spacer(minLength: 8)
+                // Cena a pod ní změna v jednotkách ceny; procenta ve štítku vpravo (jako Akcie).
                 VStack(alignment: .trailing, spacing: 2) {
                     Text(Self.price(row))
                         .font(.headline.monospacedDigit())
                         .lineLimit(1)
-                    Text(Self.change(row))
-                        .font(.subheadline.weight(.medium).monospacedDigit())
-                        .foregroundStyle(Self.color(row))
+                    if let abs = Self.absoluteChange(row) {
+                        Text(abs)
+                            .font(.caption.monospacedDigit())
+                            .foregroundStyle(Self.color(row))
+                            .lineLimit(1)
+                    }
                 }
-                if row.url != nil {
-                    Image(systemName: "chevron.right")
-                        .font(.footnote.weight(.semibold))
-                        .foregroundStyle(.tertiary)
-                }
+                Text(Self.badge(row))
+                    .font(.subheadline.weight(.semibold).monospacedDigit())
+                    .foregroundStyle(.white)
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.8)
+                    .frame(width: 74, height: 30, alignment: .trailing)
+                    .padding(.trailing, 8)
+                    .background(Self.badgeColor(row), in: .rect(cornerRadius: 7))
             }
             .padding(.horizontal, 16)
             .padding(.vertical, 10)
@@ -96,14 +103,28 @@ struct QuotesCardView: View {
         number(r.price, decimals: r.decimals) + (r.unit.map { " " + $0 } ?? "")
     }
 
-    /// „+2,96 · +1,4 %“ (u výnosů „+4 bb“).
-    static func change(_ r: QuoteBoard.Row) -> String {
+    /// Štítek vpravo: „+1,4 %“, u výnosů „+4 bb“.
+    static func badge(_ r: QuoteBoard.Row) -> String {
         if let bps = r.changeBps { return number(bps, decimals: 0, sign: true) + " bb" }
         let pct = r.change * 100
-        let percent = number(pct, decimals: abs(pct) < 10 ? 1 : 0, sign: true) + " %"
-        guard let a = r.changeAbs else { return percent }
-        let decimals = abs(a) >= 100 ? 0 : r.decimals
-        return number(a, decimals: decimals, sign: true) + " · " + percent
+        return number(pct, decimals: abs(pct) < 10 ? 2 : 1, sign: true) + " %"
+    }
+
+    /// Pod cenou: „+2,96“ (u výnosů nic – bazické body jsou ve štítku).
+    static func absoluteChange(_ r: QuoteBoard.Row) -> String? {
+        guard r.changeBps == nil, let a = r.changeAbs else { return nil }
+        return number(a, decimals: abs(a) >= 100 ? 0 : r.decimals, sign: true)
+    }
+
+    /// Pro VoiceOver.
+    static func change(_ r: QuoteBoard.Row) -> String {
+        [absoluteChange(r), badge(r)].compactMap { $0 }.joined(separator: ", ")
+    }
+
+    static func badgeColor(_ r: QuoteBoard.Row) -> Color {
+        let v = r.changeBps ?? r.change
+        if abs(v) < 0.000_05 { return Color(uiColor: .systemGray3) }
+        return v > 0 ? Color(red: 0.20, green: 0.70, blue: 0.35) : Color(red: 0.90, green: 0.27, blue: 0.24)
     }
 
     static func color(_ r: QuoteBoard.Row) -> Color {
